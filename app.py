@@ -8,6 +8,8 @@ import json
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+IS_SERVERLESS = bool(os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+
 app = Flask(__name__)
 CORS(app)
 
@@ -121,10 +123,24 @@ def get_typhoons():
             finally:
                 loading_status[request_key] = False
         
-        # Start scraping in background thread
+        if IS_SERVERLESS:
+            # Serverless: threads die when the response is sent — run synchronously.
+            scrape_data()
+            cached = typhoons_data.get(request_key, {})
+            if cached.get('error'):
+                return jsonify({'status': 'error', 'error': cached['error']}), 500
+            if not cached.get('typhoons'):
+                return jsonify({'status': 'not_found', 'message': 'No typhoons found for this year.'}), 404
+            return jsonify({
+                'status': 'success',
+                'typhoons': cached['typhoons'],
+                'earliest_time': cached['earliest_time']
+            })
+
+        # Local dev: run in background so the UI stays responsive.
         thread = threading.Thread(target=scrape_data)
         thread.start()
-        
+
         return jsonify({'status': 'loading', 'message': 'Loading typhoon data...'}), 202
         
     except ValueError as e:
