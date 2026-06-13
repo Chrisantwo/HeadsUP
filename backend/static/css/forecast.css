@@ -1,0 +1,585 @@
+/* ============================================================
+   forecast.css  –  7-Day Typhoon AI Forecast Dashboard
+   Dark Windy.com-inspired UI
+   ============================================================ */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width:  100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: #0a0e1a;
+  color: #e0e8f0;
+}
+
+/* ── Full-screen map ──────────────────────────────────────────────────────── */
+#map {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+/* The wind canvas is appended inside #map by JS; it needs no extra CSS here. */
+
+/* ── Glass panel mixin ────────────────────────────────────────────────────── */
+.glass-panel {
+  background:    rgba(10, 14, 30, 0.82);
+  border:        1px solid rgba(0, 255, 255, 0.18);
+  border-radius: 10px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding:       16px 18px;
+  box-shadow:    0 4px 24px rgba(0, 0, 0, 0.55);
+  pointer-events: all;
+}
+
+/* ── Top bar ──────────────────────────────────────────────────────────────── */
+#topbar {
+  position:   absolute;
+  top:        0;
+  left:       0;
+  right:      0;
+  z-index:    800;
+  height:     44px;
+  display:    flex;
+  align-items: center;
+  gap:        16px;
+  padding:    0 16px;
+  background: rgba(8, 12, 24, 0.90);
+  border-bottom: 1px solid rgba(0, 255, 255, 0.12);
+  backdrop-filter: blur(6px);
+  pointer-events: all;
+}
+
+.back-link {
+  color:           #00e5ff;
+  text-decoration: none;
+  font-size:       13px;
+  font-weight:     500;
+  white-space:     nowrap;
+  transition:      color 0.2s;
+}
+.back-link:hover { color: #ffffff; }
+
+.topbar-title {
+  font-size:   15px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color:       #c8e8ff;
+  flex:        1;
+}
+
+.topbar-model-tag {
+  font-size:   11px;
+  font-weight: 600;
+  padding:     2px 8px;
+  border-radius: 4px;
+  background:  rgba(0, 200, 255, 0.15);
+  color:       #00e5ff;
+  border:      1px solid rgba(0, 200, 255, 0.30);
+  letter-spacing: 0.08em;
+}
+
+/* ── Input panel ──────────────────────────────────────────────────────────── */
+#input-panel {
+  position:  absolute;
+  top:       54px;
+  left:      16px;
+  width:     320px;
+  z-index:   700;
+  max-height: calc(100vh - 130px);
+  overflow-y: auto;
+}
+
+.panel-title {
+  font-size:    14px;
+  font-weight:  600;
+  color:        #00e5ff;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 14px;
+}
+
+.form-group {
+  margin-bottom: 12px;
+}
+
+.field-label {
+  display:      block;
+  font-size:    11px;
+  font-weight:  600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color:        #7ab0cc;
+  margin-bottom: 5px;
+}
+
+.field-label .hint {
+  font-weight:   400;
+  text-transform: none;
+  letter-spacing: 0;
+  color:         #4a6c80;
+}
+
+.text-input {
+  width:         100%;
+  background:    rgba(0, 180, 255, 0.07);
+  border:        1px solid rgba(0, 180, 255, 0.25);
+  border-radius: 6px;
+  color:         #d0eeff;
+  font-size:     13px;
+  padding:       7px 10px;
+  outline:       none;
+  transition:    border-color 0.2s;
+}
+.text-input:focus { border-color: rgba(0, 200, 255, 0.60); }
+
+.track-textarea {
+  width:         100%;
+  background:    rgba(0, 180, 255, 0.05);
+  border:        1px solid rgba(0, 180, 255, 0.20);
+  border-radius: 6px;
+  color:         #a0d0e8;
+  font-size:     11px;
+  font-family:   'Consolas', 'Menlo', monospace;
+  padding:       8px 10px;
+  outline:       none;
+  resize:        vertical;
+  min-height:    140px;
+  transition:    border-color 0.2s;
+}
+.track-textarea:focus { border-color: rgba(0, 200, 255, 0.55); }
+
+.btn-row {
+  display: flex;
+  gap:     8px;
+  margin-top: 4px;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────────── */
+.primary-btn {
+  background:    linear-gradient(135deg, #007acc 0%, #0056a0 100%);
+  border:        1px solid rgba(0, 160, 255, 0.50);
+  border-radius: 6px;
+  color:         #ffffff;
+  font-size:     13px;
+  font-weight:   600;
+  padding:       8px 16px;
+  cursor:        pointer;
+  flex:          1;
+  transition:    background 0.2s, transform 0.1s;
+}
+.primary-btn:hover  { background: linear-gradient(135deg, #0090e0 0%, #0068bc 100%); }
+.primary-btn:active { transform: scale(0.97); }
+.primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.secondary-btn {
+  background:    rgba(255, 255, 255, 0.08);
+  border:        1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  color:         #b0cce0;
+  font-size:     12px;
+  font-weight:   500;
+  padding:       8px 12px;
+  cursor:        pointer;
+  transition:    background 0.2s;
+}
+.secondary-btn:hover { background: rgba(255, 255, 255, 0.14); color: #ffffff; }
+
+.danger-btn {
+  background:    rgba(200, 50, 50, 0.15);
+  border:        1px solid rgba(220, 80, 80, 0.35);
+  border-radius: 6px;
+  color:         #ff8080;
+  font-size:     12px;
+  font-weight:   500;
+  padding:       7px 14px;
+  cursor:        pointer;
+  transition:    background 0.2s;
+}
+.danger-btn:hover { background: rgba(200, 50, 50, 0.28); }
+
+.small-btn { font-size: 12px; padding: 6px 12px; }
+
+/* ── Error / loading messages ────────────────────────────────────────────── */
+.error-msg {
+  margin-top:    8px;
+  font-size:     12px;
+  color:         #ff7070;
+  background:    rgba(200, 30, 30, 0.12);
+  border:        1px solid rgba(200, 30, 30, 0.25);
+  border-radius: 6px;
+  padding:       7px 10px;
+}
+
+.loading-msg {
+  margin-top:    8px;
+  font-size:     12px;
+  color:         #80cfff;
+  display:       flex;
+  align-items:   center;
+  gap:           8px;
+}
+
+.spinner {
+  width:         16px;
+  height:        16px;
+  border:        2px solid rgba(0, 200, 255, 0.3);
+  border-top:    2px solid #00e5ff;
+  border-radius: 50%;
+  animation:     spin 0.8s linear infinite;
+  flex-shrink:   0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.hidden { display: none !important; }
+
+/* ── Storm info panel ─────────────────────────────────────────────────────── */
+#storm-panel {
+  position:  absolute;
+  top:       54px;
+  left:      16px;
+  width:     240px;
+  z-index:   700;
+}
+
+.storm-header {
+  display:     flex;
+  align-items: center;
+  gap:         10px;
+  margin-bottom: 14px;
+}
+
+.category-badge {
+  font-size:     10px;
+  font-weight:   800;
+  letter-spacing: 0.08em;
+  padding:       3px 7px;
+  border-radius: 5px;
+  white-space:   nowrap;
+  flex-shrink:   0;
+}
+
+.storm-name {
+  font-size:   18px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color:       #ffffff;
+  text-shadow: 0 0 12px rgba(0, 200, 255, 0.5);
+}
+
+.storm-stats {
+  margin-bottom: 12px;
+}
+
+.stat-row {
+  display:         flex;
+  justify-content: space-between;
+  align-items:     center;
+  padding:         4px 0;
+  border-bottom:   1px solid rgba(255, 255, 255, 0.05);
+}
+
+.stat-label {
+  font-size:     11px;
+  font-weight:   500;
+  color:         #607890;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.stat-value {
+  font-size:   13px;
+  font-weight: 600;
+  color:       #c8e8ff;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Wind speed color legend */
+.wind-legend {
+  display:     flex;
+  align-items: center;
+  gap:         6px;
+  margin-top:  10px;
+  font-size:   10px;
+  color:       #607890;
+}
+
+.legend-bar {
+  flex:          1;
+  height:        5px;
+  border-radius: 3px;
+  background:    linear-gradient(90deg,
+    #0350c8 0%, #00c8ff 15%, #00e646 35%,
+    #ffe600 55%, #ff7800 75%, #ff1e1e 100%
+  );
+}
+
+.legend-label { white-space: nowrap; }
+
+/* ── PAR bounding box label ───────────────────────────────────────────────── */
+#par-label {
+  position:   absolute;
+  top:        58px;
+  right:      16px;
+  z-index:    700;
+  font-size:  11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color:      rgba(0, 255, 255, 0.40);
+  pointer-events: none;
+}
+
+/* ── Timeline bar ─────────────────────────────────────────────────────────── */
+#timeline-bar {
+  position:  absolute;
+  bottom:    0;
+  left:      0;
+  right:     0;
+  z-index:   750;
+  background: rgba(6, 10, 22, 0.92);
+  border-top: 1px solid rgba(0, 255, 255, 0.14);
+  backdrop-filter: blur(8px);
+  padding:   10px 20px 8px;
+  pointer-events: all;
+}
+
+.tl-controls {
+  display:     flex;
+  align-items: center;
+  gap:         14px;
+  margin-bottom: 6px;
+}
+
+.tl-play-btn {
+  width:         36px;
+  height:        36px;
+  border-radius: 50%;
+  background:    rgba(0, 180, 255, 0.15);
+  border:        1px solid rgba(0, 200, 255, 0.40);
+  color:         #00e5ff;
+  font-size:     15px;
+  display:       flex;
+  align-items:   center;
+  justify-content: center;
+  cursor:        pointer;
+  transition:    background 0.2s, transform 0.1s;
+  flex-shrink:   0;
+}
+.tl-play-btn:hover  { background: rgba(0, 200, 255, 0.28); }
+.tl-play-btn:active { transform: scale(0.92); }
+
+.tl-hour-display {
+  display:     flex;
+  align-items: baseline;
+  gap:         6px;
+}
+
+.tl-hour-label {
+  font-size:   11px;
+  font-weight: 500;
+  color:       #607890;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.tl-hour-value {
+  font-size:   22px;
+  font-weight: 700;
+  color:       #00e5ff;
+  font-variant-numeric: tabular-nums;
+  min-width:   80px;
+  text-shadow: 0 0 10px rgba(0, 200, 255, 0.40);
+}
+
+.tl-slider-wrap {
+  display:     flex;
+  align-items: center;
+  gap:         10px;
+}
+
+.tl-edge {
+  font-size:  11px;
+  color:      #4a6c80;
+  white-space: nowrap;
+  min-width:   28px;
+  text-align: center;
+}
+
+/* Timeline range slider */
+#timeline-slider {
+  -webkit-appearance: none;
+  appearance:  none;
+  flex:        1;
+  height:      4px;
+  border-radius: 2px;
+  background:  linear-gradient(90deg, #007acc 0%, #003060 100%);
+  outline:     none;
+  cursor:      pointer;
+}
+
+#timeline-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width:         16px;
+  height:        16px;
+  border-radius: 50%;
+  background:    #00e5ff;
+  box-shadow:    0 0 8px rgba(0, 200, 255, 0.70);
+  cursor:        pointer;
+  border:        2px solid rgba(10, 14, 30, 0.8);
+  transition:    transform 0.1s;
+}
+#timeline-slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
+
+#timeline-slider::-moz-range-thumb {
+  width:         16px;
+  height:        16px;
+  border-radius: 50%;
+  background:    #00e5ff;
+  box-shadow:    0 0 8px rgba(0, 200, 255, 0.70);
+  cursor:        pointer;
+  border:        2px solid rgba(10, 14, 30, 0.8);
+}
+
+/* Tick marks */
+.tl-ticks {
+  position:  relative;
+  height:    14px;
+  margin-top: 2px;
+  padding:   0 14px;
+}
+
+.tl-tick {
+  position:   absolute;
+  transform:  translateX(-50%);
+  font-size:  9px;
+  color:      #3a5568;
+  white-space: nowrap;
+}
+
+.tl-tick::before {
+  content:   '';
+  display:   block;
+  width:     1px;
+  height:    4px;
+  background: #3a5568;
+  margin:    0 auto 1px;
+}
+
+/* ── Storm pulse marker (injected as L.divIcon HTML) ────────────────────── */
+.storm-pulse-wrapper {
+  width:    44px;
+  height:   44px;
+  position: relative;
+}
+
+.pulse-dot {
+  width:     12px;
+  height:    12px;
+  border-radius: 50%;
+  position:  absolute;
+  top:       16px;
+  left:      16px;
+}
+
+.pulse-ring, .pulse-ring2 {
+  width:     44px;
+  height:    44px;
+  border:    2px solid;
+  border-radius: 50%;
+  position:  absolute;
+  top:       0;
+  left:      0;
+  animation: stormPulse 2s ease-out infinite;
+}
+
+.pulse-ring2 {
+  animation-delay: 1s;
+}
+
+@keyframes stormPulse {
+  0%   { transform: scale(0.30); opacity: 0.90; }
+  100% { transform: scale(1.80); opacity: 0;    }
+}
+
+/* ── Leaflet tooltip dark theme override ──────────────────────────────────── */
+.leaflet-tooltip {
+  background:    rgba(10, 14, 30, 0.88) !important;
+  border:        1px solid rgba(0, 200, 255, 0.30) !important;
+  color:         #c8e8ff !important;
+  font-size:     11px !important;
+  border-radius: 5px !important;
+  padding:       4px 8px !important;
+  box-shadow:    0 2px 8px rgba(0,0,0,0.5) !important;
+}
+
+.leaflet-tooltip::before { display: none; }
+
+/* ── Tab switcher ─────────────────────────────────────────────────────────── */
+.tab-row {
+  display:        flex;
+  gap:            4px;
+  margin-bottom:  14px;
+  border-bottom:  1px solid rgba(0, 200, 255, 0.12);
+  padding-bottom: 10px;
+}
+
+.tab-btn {
+  background:    transparent;
+  border:        1px solid rgba(0, 180, 255, 0.20);
+  border-radius: 6px;
+  color:         #607890;
+  font-size:     12px;
+  font-weight:   500;
+  padding:       5px 14px;
+  cursor:        pointer;
+  transition:    all 0.2s;
+}
+.tab-btn:hover  { color: #a0ccee; border-color: rgba(0, 180, 255, 0.40); }
+.tab-btn.active {
+  background:   rgba(0, 160, 255, 0.15);
+  border-color: rgba(0, 200, 255, 0.45);
+  color:        #00e5ff;
+  font-weight:  600;
+}
+
+.tab-content { }
+
+/* input row helper */
+.input-row {
+  display: flex;
+  gap:     8px;
+  align-items: center;
+}
+.input-row .text-input { flex: 1; }
+
+/* select element */
+select.text-input {
+  cursor: pointer;
+  appearance: auto;
+  -webkit-appearance: auto;
+}
+
+/* ── Scrollbar (for overflow panels) ─────────────────────────────────────── */
+::-webkit-scrollbar       { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(0, 200, 255, 0.25); border-radius: 3px; }
+
+/* ── Leaflet control overrides (dark theme) ───────────────────────────────── */
+.leaflet-control-zoom a {
+  background:  rgba(10, 14, 30, 0.85) !important;
+  color:       #00e5ff !important;
+  border-color: rgba(0, 200, 255, 0.25) !important;
+}
+.leaflet-control-zoom a:hover {
+  background: rgba(0, 40, 80, 0.90) !important;
+}
+
+.leaflet-control-attribution {
+  background: rgba(5, 8, 18, 0.70) !important;
+  color:      #3a5568 !important;
+  font-size:  9px !important;
+}
+.leaflet-control-attribution a { color: #4a7090 !important; }

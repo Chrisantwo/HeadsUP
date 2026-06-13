@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Storm Forecasting – Real-Time PAR Typhoon Tracker</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/leaflet.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=8" />
+</head>
+<body>
+
+  <!-- Leaflet map (full viewport) -->
+  <div id="map"></div>
+  <!-- Wind particle canvas (appended inside #map by JS) -->
+  <canvas id="wind-canvas"></canvas>
+  <!-- Temperature heat-map canvas (behind wind, over tiles) -->
+  <canvas id="temp-canvas" style="display:none;"></canvas>
+
+  <!-- ── Top bar ── -->
+  <header id="topbar">
+    <div class="brand">
+      <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 2a10 10 0 1 0 10 10"/>
+        <path d="M12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8"/>
+        <path d="M12 2v3M12 19v3M3 12H6M18 12h3"/>
+      </svg>
+      <div class="brand-text">
+        <span class="brand-name">Storm Forecasting</span>
+        <span class="brand-sub">Real-Time PAR · Western Pacific</span>
+      </div>
+    </div>
+    <div class="topbar-center">
+      <span id="topbar-status">Loading typhoon data…</span>
+    </div>
+    <div class="topbar-right">
+      <span class="topbar-time" id="topbar-time"></span>
+      <span id="live-badge">LIVE</span>
+    </div>
+  </header>
+
+  <!-- ── Left panel ── -->
+  <div id="left-panel" class="glass">
+
+    <div id="loading-indicator" class="load-overlay hidden">
+      <div class="spinner"></div>
+      <span id="loading-msg">Loading…</span>
+    </div>
+    <div id="err-panel" class="err-banner hidden"></div>
+
+    <!-- Historical selector -->
+    <div id="selector-section">
+      <div class="panel-head">
+        <div class="ph-title">Historical Storm Browser</div>
+        <div class="ph-hint">IBTrACS Archive 2013–2025</div>
+      </div>
+      <div class="field-grp">
+        <label class="field-lbl">Year</label>
+        <div class="input-row">
+          <input id="inp-year" type="number" value="2024" min="2013" max="2025" class="text-inp yr-inp" />
+          <button id="btn-load-year" class="btn-secondary sm">Load</button>
+        </div>
+      </div>
+      <div class="field-grp">
+        <label class="field-lbl">Storm</label>
+        <select id="inp-storm" class="text-inp" disabled>
+          <option value="">— Load a year first —</option>
+        </select>
+      </div>
+      <div class="field-grp" id="hist-hrs-group" style="display:none;">
+        <label class="field-lbl">Forecast history window</label>
+        <select id="inp-hist-hrs" class="text-inp">
+          <option value="12">12 h</option>
+          <option value="24">24 h</option>
+          <option value="48" selected>48 h</option>
+          <option value="72">72 h</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Storm info (shown after storm selected) -->
+    <div id="storm-info-section" class="hidden">
+      <div class="divider"></div>
+      <div class="storm-title-row">
+        <span id="info-mode-badge" class="mode-badge badge-hist">Historical</span>
+        <h2 id="info-name" class="storm-name-h">STORM</h2>
+      </div>
+      <div id="active-source-info" class="source-tag hidden">Source: <span id="active-source-val">--</span></div>
+      <div class="storm-stats">
+        <div class="stat-row"><span class="stat-lbl">Category</span><span id="info-cat" class="stat-val">TD</span></div>
+        <div class="stat-row"><span class="stat-lbl">Position</span><span id="info-pos" class="stat-val">-- °N, -- °E</span></div>
+        <div class="stat-row"><span class="stat-lbl">Pressure</span><span id="info-pres" class="stat-val">-- hPa</span></div>
+        <div class="stat-row"><span class="stat-lbl">Max Winds</span><span id="info-wind" class="stat-val">-- kt</span></div>
+        <div class="stat-row"><span class="stat-lbl">Time / Lead</span><span id="info-lead" class="stat-val">--</span></div>
+      </div>
+      <div class="wind-legend">
+        <span class="wl-lbl">Calm</span><div class="wl-bar"></div><span class="wl-lbl">80 kt</span>
+      </div>
+    </div>
+
+    <!-- Action buttons -->
+    <div id="action-section" class="hidden">
+      <div id="hist-actions">
+        <button id="btn-run-forecast" class="btn-primary full">&#9654; Run 7-Day AI Forecast + Ensemble</button>
+      </div>
+      <div id="fcst-actions" class="hidden">
+        <div class="fcst-method-row">
+          <span class="fcst-lbl">Engine</span>
+          <span id="fcst-method-badge" class="method-badge">PHYSICS</span>
+        </div>
+        <button id="btn-back-hist" class="btn-secondary full">&#8592; Back to Historical</button>
+      </div>
+    </div>
+
+    <!-- Category legend -->
+    <div class="divider" style="margin-top:auto;"></div>
+    <div class="cat-legend">
+      <div class="cl-row"><span class="cl-dot" style="background:#87ceeb"></span><span>TD &lt;34kt</span></div>
+      <div class="cl-row"><span class="cl-dot" style="background:#64ee64"></span><span>TS 34-63kt</span></div>
+      <div class="cl-row"><span class="cl-dot" style="background:#e1e100"></span><span>TY 64-95kt</span></div>
+      <div class="cl-row"><span class="cl-dot" style="background:#ff8200"></span><span>STY Cat3</span></div>
+      <div class="cl-row"><span class="cl-dot" style="background:#ff0000"></span><span>STY Cat4</span></div>
+      <div class="cl-row"><span class="cl-dot" style="background:#ff00ff"></span><span>STY Cat5</span></div>
+    </div>
+  </div>
+
+  <!-- ── Right panel – layers + map type ── -->
+  <div id="right-panel" class="glass">
+    <div class="rp-title">Weather Layers</div>
+    <button class="layer-pill active" data-layer="wind">
+      <span class="lp-dot lp-wind"></span>Wind
+    </button>
+    <button class="layer-pill" data-layer="rain">
+      <span class="lp-dot lp-rain"></span>Rain Radar
+    </button>
+    <button class="layer-pill" data-layer="temp">
+      <span class="lp-dot lp-temp"></span>Temperature
+    </button>
+    <button class="layer-pill" data-layer="heat">
+      <span class="lp-dot lp-heat"></span>Heat Index
+    </button>
+    <button class="layer-pill" data-layer="cloud">
+      <span class="lp-dot lp-cloud"></span>Clouds
+    </button>
+    <button class="layer-pill" data-layer="wave">
+      <span class="lp-dot lp-wave"></span>Waves
+    </button>
+    <button class="layer-pill" data-layer="seasonal">
+      <span class="lp-dot lp-seasonal"></span>Season Outlook
+    </button>
+    <button class="layer-pill" data-layer="satellite">
+      <span class="lp-dot lp-sat"></span>Satellite Only
+    </button>
+
+    <div class="map-type-row">
+      <button class="map-type-btn active" data-map="satellite">SAT</button>
+      <button class="map-type-btn" data-map="terrain">MAP</button>
+      <button class="map-type-btn" data-map="dark">DARK</button>
+    </div>
+  </div>
+
+  <!-- ── PAR label ── -->
+  <div id="par-label">PAR</div>
+
+  <!-- ── Bottom timeline bar (Windy-style) ── -->
+  <div id="timeline-bar">
+
+    <!-- Row 1: step controls · time display · storm name -->
+    <div class="tl-row-top">
+      <div class="tl-left-ctrl">
+        <button id="btn-step-back" class="tl-step-btn" title="Back 1 step">&#9664;</button>
+        <button id="btn-play" class="btn-play" title="Play / Pause">&#9654;</button>
+        <button id="btn-step-fwd" class="tl-step-btn" title="Forward 1 step">&#9654;</button>
+        <div class="tl-info">
+          <span id="tl-mode-lbl" class="tl-mode-lbl">Historical</span>
+          <span id="tl-time-lbl" class="tl-time-lbl">--</span>
+        </div>
+      </div>
+      <div class="tl-right-info">
+        <span id="tl-storm-lbl" class="tl-storm-lbl">--</span>
+        <span id="tl-step-lbl" class="tl-step-lbl">Step 0/56</span>
+      </div>
+    </div>
+
+    <!-- Row 2: day/date labels (Today, Tomorrow, Mon Jun 16…) -->
+    <div id="tl-date-labels"></div>
+
+    <!-- Row 3: slider -->
+    <div class="tl-slider-row">
+      <input type="range" id="tl-slider" min="0" max="55" step="1" value="0" />
+    </div>
+
+    <!-- Row 4: hour ticks -->
+    <div class="tl-ticks-row">
+      <div id="tl-ticks" class="tl-ticks"></div>
+    </div>
+
+  </div>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast"></div>
+
+  <script src="{{ url_for('static', filename='js/leaflet.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/stormforecasting.js') }}?v=8"></script>
+</body>
+</html>

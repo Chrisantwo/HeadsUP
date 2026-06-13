@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>7-Day Typhoon Forecast – Storm Forecasting</title>
+
+  <!-- Leaflet served locally – no internet required -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/leaflet.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/forecast.css') }}?v=3" />
+</head>
+<body>
+
+  <!-- Full-screen Leaflet map -->
+  <div id="map"></div>
+  <!-- Wind particle canvas (moved inside #map by JS) -->
+  <canvas id="wind-canvas"></canvas>
+
+  <!-- Top bar -->
+  <div id="topbar">
+    <a href="/" class="back-link">&#8592; Storm Forecasting</a>
+    <span class="topbar-title">7-Day Typhoon AI Forecast</span>
+    <span id="topbar-method-tag" class="topbar-model-tag">PHYSICS ENGINE</span>
+  </div>
+
+  <!-- ── Input panel ── -->
+  <div id="input-panel" class="glass-panel">
+    <h2 class="panel-title">Select Storm</h2>
+
+    <!-- Tab switcher -->
+    <div class="tab-row">
+      <button class="tab-btn active" data-tab="historical">Historical</button>
+      <button class="tab-btn"        data-tab="manual">Manual JSON</button>
+    </div>
+
+    <!-- TAB: Historical IBTrACS storm -->
+    <div id="tab-historical" class="tab-content">
+      <div class="form-group">
+        <label class="field-label" for="inp-year">Year</label>
+        <div class="input-row">
+          <input id="inp-year" type="number" class="text-input"
+                 placeholder="e.g. 2024" min="2013" max="2026"
+                 value="2024" style="width:110px;" />
+          <button id="btn-load-storms" class="secondary-btn">Load Storms</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="field-label" for="inp-storm-select">Storm</label>
+        <select id="inp-storm-select" class="text-input" disabled>
+          <option value="">— Load a year first —</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="field-label" for="inp-history-hrs">
+          History window
+          <span class="hint">(hours of observed track used as input)</span>
+        </label>
+        <select id="inp-history-hrs" class="text-input">
+          <option value="12">12 h</option>
+          <option value="24">24 h</option>
+          <option value="48" selected>48 h</option>
+          <option value="72">72 h (full if available)</option>
+        </select>
+      </div>
+
+      <button id="btn-run-historical" class="primary-btn" style="width:100%;" disabled>
+        Run 7-Day Forecast &#9654;
+      </button>
+    </div>
+
+    <!-- TAB: Manual JSON input -->
+    <div id="tab-manual" class="tab-content hidden">
+      <div class="form-group">
+        <label class="field-label" for="inp-storm-name">Storm Name</label>
+        <input id="inp-storm-name" type="text" class="text-input"
+               placeholder="e.g. CARINA" maxlength="32" />
+      </div>
+      <div class="form-group">
+        <label class="field-label" for="inp-track-json">
+          Track History (JSON)
+          <span class="hint">lat, lon, pressure, wind_speed (knots)</span>
+        </label>
+        <textarea id="inp-track-json" class="track-textarea" rows="9"
+          placeholder='[
+  {"lat":8.5,"lon":130.2,"pressure":998,"wind_speed":45},
+  {"lat":9.1,"lon":129.8,"pressure":995,"wind_speed":50},
+  ...
+]'></textarea>
+      </div>
+      <div class="btn-row">
+        <button id="btn-load-sample" class="secondary-btn">Load Sample</button>
+        <button id="btn-run-manual"  class="primary-btn">Run Forecast &#9654;</button>
+      </div>
+    </div>
+
+    <div id="inp-error"   class="error-msg  hidden"></div>
+    <div id="inp-loading" class="loading-msg hidden">
+      <span class="spinner"></span>&nbsp;Running forecast&hellip;
+    </div>
+  </div>
+
+  <!-- ── Storm info panel (shown after forecast loads) ── -->
+  <div id="storm-panel" class="glass-panel hidden">
+    <div class="storm-header">
+      <div id="storm-category-badge" class="category-badge">TD</div>
+      <h2 id="storm-name-display" class="storm-name">UNNAMED</h2>
+    </div>
+    <div class="storm-stats">
+      <div class="stat-row">
+        <span class="stat-label">Forecast lead</span>
+        <span id="stat-time"     class="stat-value">--</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Center</span>
+        <span id="stat-position" class="stat-value">--</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Pressure</span>
+        <span id="stat-pressure" class="stat-value">-- hPa</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Max Winds</span>
+        <span id="stat-wind"     class="stat-value">-- kt</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Method</span>
+        <span id="stat-method"   class="stat-value">--</span>
+      </div>
+    </div>
+    <div class="wind-legend">
+      <span class="legend-label">Calm</span>
+      <div class="legend-bar"></div>
+      <span class="legend-label">40 m/s</span>
+    </div>
+    <button id="btn-new-forecast" class="danger-btn small-btn" style="margin-top:10px;">
+      &#8592; New Forecast
+    </button>
+  </div>
+
+  <!-- PAR label -->
+  <div id="par-label" class="par-label hidden">PAR</div>
+
+  <!-- ── Timeline bar ── -->
+  <div id="timeline-bar" class="hidden">
+    <div class="tl-controls">
+      <button id="btn-play" class="tl-play-btn" title="Play / Pause">&#9654;</button>
+      <div class="tl-hour-display">
+        <span class="tl-hour-label">Forecast</span>
+        <span id="tl-hour-value" class="tl-hour-value">+0 h</span>
+      </div>
+    </div>
+    <div class="tl-slider-wrap">
+      <span class="tl-edge">0 h</span>
+      <input type="range" id="timeline-slider" min="0" max="55" step="1" value="0" />
+      <span class="tl-edge">168 h</span>
+    </div>
+    <div class="tl-ticks" id="tl-ticks"></div>
+  </div>
+
+  <!-- Leaflet served locally -->
+  <script src="{{ url_for('static', filename='js/leaflet.js') }}"></script>
+  <!-- Cache-bust with ?v=3 so old cached version is not used -->
+  <script src="{{ url_for('static', filename='js/forecast_engine.js') }}?v=3"></script>
+</body>
+</html>
