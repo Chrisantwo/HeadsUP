@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Storm Forecasting</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div id="app-root">
+        <canvas id="storm-canvas"></canvas>
+
+        <div class="left-panel glass-panel">
+            <h1 class="title">Storm Forecasting</h1>
+
+            <div class="input-section">
+                <label class="field-label" for="year-input">Year (1951 – Present)</label>
+                <div class="input-row">
+                    <input
+                        type="number"
+                        id="year-input"
+                        placeholder="e.g. 2013"
+                        min="1951"
+                        class="year-input"
+                        required
+                    />
+                    <button id="submit-btn" class="primary-btn">Load</button>
+                </div>
+                <label class="field-label" for="storm-select">Typhoon</label>
+                <select id="storm-select" class="storm-select" disabled>
+                    <option value="">Load a year first</option>
+                </select>
+                <div id="loading-message" class="loading-message hidden">Loading typhoon data...</div>
+                <div id="error-message" class="error-message hidden"></div>
+            </div>
+
+            <div class="info-section">
+                <h2 class="section-title">View</h2>
+                <div class="toggle-row">
+                    <button id="zoom-btn" class="secondary-btn">ZOOM PAR</button>
+                </div>
+                <div class="toggle-row">
+                    <button id="heat-toggle" class="secondary-btn small-btn">HEAT MAP ON</button>
+                    <button id="wind-toggle" class="secondary-btn small-btn">WIND MAP ON</button>
+                </div>
+                <div class="toggle-row">
+                    <button id="prediction-toggle-btn" class="secondary-btn small-btn">FORECAST CONE ON</button>
+                </div>
+                <label class="field-label">Realtime Weather Layer</label>
+                <div class="toggle-row">
+                    <button id="realtime-forecast-btn" class="primary-btn small-btn forecast-btn">REALTIME FORECAST</button>
+                </div>
+                <div class="toggle-row">
+                    <button id="forecast-now-btn" class="secondary-btn small-btn">NOW</button>
+                    <button id="forecast-3h-btn" class="secondary-btn small-btn">+3H</button>
+                    <button id="forecast-6h-btn" class="secondary-btn small-btn">+6H</button>
+                    <button id="forecast-12h-btn" class="secondary-btn small-btn">+12H</button>
+                </div>
+                <div class="toggle-row">
+                    <button id="layer-heat-btn" class="secondary-btn small-btn">UPDATE HEAT MAP</button>
+                    <button id="layer-wind-btn" class="secondary-btn small-btn">UPDATE WIND MAP</button>
+                </div>
+                <div class="toggle-row">
+                    <button id="layer-off-btn" class="danger-btn small-btn">LAYER OFF</button>
+                </div>
+                <p class="hint-text">Use the controls below to play, pause, or jump forward in time.</p>
+            </div>
+        </div>
+
+        <div class="bottom-bar glass-panel">
+            <div class="playback-controls">
+                <button id="play-pause-btn" class="primary-btn small-btn">PLAY</button>
+                <button id="skip-btn" class="secondary-btn small-btn">&gt;&gt; 1 WEEK</button>
+                <button id="back-btn" class="danger-btn small-btn">BACK TO MENU</button>
+            </div>
+
+            <div class="timeline-container">
+                <span class="timeline-label">Start</span>
+                <input type="range" id="timeline-slider" min="0" max="100" step="1" value="0" />
+                <span class="timeline-label">End</span>
+            </div>
+
+            <div class="time-fps">
+                <div id="time-display" class="time-display">Current Time: --</div>
+                <div id="fps-display" class="fps-display">FPS: --</div>
+            </div>
+        </div>
+
+        <div id="overlay-scale" class="overlay-scale glass-panel hidden">
+            <div class="scale-top-row">
+                <div class="model-tags">
+                    <span id="scale-model-primary" class="model-tag active">Open-Meteo</span>
+                    <span class="model-tag">Forecast</span>
+                </div>
+                <div id="scale-label" class="scale-label">TEMPERATURE (°C)</div>
+            </div>
+            <div id="scale-bar" class="scale-bar"></div>
+            <div id="scale-ticks" class="scale-ticks"></div>
+        </div>
+
+        <div class="right-rail">
+            <div id="legend" class="legend glass-panel">
+                <h3>Typhoon Categories</h3>
+                <div class="legend-items">
+                    <div class="legend-item">
+                        <div class="legend-color" style="background-color: rgb(135, 206, 235);"></div>
+                        <span>TD - Tropical Depression</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background-color: rgb(100, 238, 100);"></div>
+                        <span>TS - Tropical Storm</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background-color: rgb(225, 225, 0);"></div>
+                        <span>TY - Typhoon (Cat 1-2)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background-color: rgb(255, 130, 0);"></div>
+                        <span>STY - Severe Typhoon (Cat 3)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background-color: rgb(255, 0, 0);"></div>
+                        <span>STY - Super Typhoon (Cat 4)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background-color: rgb(255, 0, 255);"></div>
+                        <span>STY - Super Typhoon (Cat 5)</span>
+                    </div>
+                </div>
+            </div>
+
+            <div id="layer-menu" class="layer-menu glass-panel">
+                <button class="layer-pill" data-layer="weather-radar"><span>Weather radar</span><span class="layer-dot radar"></span></button>
+                <button class="layer-pill" data-layer="satellite"><span>Satellite</span><span class="layer-dot satellite"></span></button>
+                <button class="layer-pill" data-layer="wind"><span>Wind</span><span class="layer-dot wind"></span></button>
+                <button class="layer-pill" data-layer="rain-thunder"><span>Rain, thunder</span><span class="layer-dot rain"></span></button>
+                <button class="layer-pill" data-layer="temperature"><span>Temperature</span><span class="layer-dot temp"></span></button>
+                <button class="layer-pill" data-layer="hurricane-tracker"><span>Hurricane tracker</span><span class="layer-dot hurricane"></span></button>
+                <button class="layer-pill" data-layer="clouds"><span>Clouds</span><span class="layer-dot clouds"></span></button>
+                <button class="layer-pill" data-layer="waves"><span>Waves</span><span class="layer-dot waves"></span></button>
+                <button class="layer-pill" data-layer="rain-accumulation"><span>Rain accumulation</span><span class="layer-dot accum"></span></button>
+                <button class="layer-pill" data-layer="thunderstorms"><span>Thunderstorms</span><span class="layer-dot thunder"></span></button>
+            </div>
+        </div>
+
+        <div id="weather-panel" class="weather-panel glass-panel">
+            <h3>Realtime Layer Status</h3>
+            <div id="weather-latlon" class="weather-meta">Layer: OFF</div>
+            <div id="weather-current" class="weather-current">Use the buttons to load map-wide realtime weather overlays.</div>
+            <div id="weather-hourly" class="weather-hourly">Not using pin-point weather.</div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/stormforecasting.js') }}"></script>
+</body>
+</html>
