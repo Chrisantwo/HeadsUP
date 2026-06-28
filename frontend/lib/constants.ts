@@ -52,5 +52,7 @@ export const MAP_TILES: Record<MapTheme, { url: string; attr: string; maxZoom: n
   },
 }
 
-// Flask backend URL — update if running on a different port
-export const API_BASE = 'http://localhost:5000'
+// Empty in production (same-origin Vercel deployment).
+// Set NEXT_PUBLIC_API_URL=http://localhost:5000 in .env.local for local dev
+// when the Next.js dev proxy (next.config.mjs rewrites) is not used.
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? ''
