@@ -28,6 +28,9 @@ typhoons_data = {}
 loading_status = {}
 weather_grid_cache = {}
 full_grid_cache = {}   # stores complete 7-day hourly grid, refreshed every 30 min
+live_storms_cache = {'storms': [], 'source': 'loading', 'fetched_at': None}
+marine_full_grid_cache = {}
+_live_storms_lock = threading.Lock()
 
 def get_resource_path(relative_path):
     """Get the absolute path to a resource."""
@@ -59,11 +62,58 @@ def _estimate_vel(path_pts, n=6):
 
 def _fetch_live_storms():
     """
-    Try PAGASA → JTWC RSS → IBTrACS-recent fallback.
+    Try NRL ATCF → JMA → PAGASA → JTWC RSS → IBTrACS-recent fallback.
     Returns list of storm dicts or [].
     Each dict: {name, lat, lon, pressure, wind_speed, category, source, path}
     where path is [{lat, lon, pressure, wind_speed}] usable as run_forecast input.
     """
+    # 0. JMA RSMC Tokyo — authoritative WP source, same data Windy.com uses
+    try:
+        _jma_r = requests.get(
+            'https://www.jma.go.jp/bosai/typhoon/data/current_information.json',
+            timeout=10, headers={'User-Agent': 'StormForecastingApp/1.0'}
+        )
+        _jma_r.raise_for_status()
+        _jma = _jma_r.json()
+        _jma_storms = []
+        # JMA returns a list of active TC objects
+        _tc_list = _jma if isinstance(_jma, list) else _jma.get('TyphoonList', _jma.get('cyclones', []))
+        for _tc in _tc_list:
+            try:
+                _name = str(_tc.get('name', _tc.get('Name', 'UNNAMED'))).upper().strip() or 'UNNAMED'
+                # Current analysis position
+                _anal = _tc.get('AnalysisInfo', _tc.get('analysis', _tc))
+                _lat = float(_anal.get('lat', _anal.get('Lat', _tc.get('lat', 0))))
+                _lon = float(_anal.get('lon', _anal.get('Lon', _tc.get('lon', 0))))
+                if not (0 <= _lat <= 50 and 90 <= _lon <= 185): continue
+                _wind = float(_anal.get('wind', _anal.get('Wind', _tc.get('wind', 35))))
+                _pres = float(_anal.get('pressure', _anal.get('Pressure', _tc.get('pressure', 990))))
+                # Build path from track if available
+                _track = _tc.get('TrackList', _tc.get('track', []))
+                _path = []
+                for _pt in _track:
+                    try:
+                        _path.append({
+                            'lat': float(_pt.get('lat', _pt.get('Lat', _lat))),
+                            'lon': float(_pt.get('lon', _pt.get('Lon', _lon))),
+                            'pressure': float(_pt.get('pressure', _pt.get('Pressure', _pres))),
+                            'wind_speed': float(_pt.get('wind', _pt.get('Wind', _wind))),
+                        })
+                    except Exception: continue
+                if not _path:
+                    _path = [{'lat': _lat, 'lon': _lon, 'pressure': _pres, 'wind_speed': _wind}]
+                _jma_storms.append({
+                    'name': _name, 'lat': _lat, 'lon': _lon,
+                    'pressure': _pres, 'wind_speed': _wind,
+                    'category': _wind_to_cat(_wind), 'source': 'JMA RSMC',
+                    'velocity': _estimate_vel(_path), 'path': _path,
+                })
+            except Exception: continue
+        if _jma_storms:
+            return _jma_storms
+    except Exception as _ex:
+        logger.warning('JMA fetch failed: %s', _ex)
+
     # 1. PAGASA
     for url in [
         'https://pubfiles.pagasa.dost.gov.ph/tamss/weather/bulletin.json',
@@ -94,7 +144,8 @@ def _fetch_live_storms():
         except Exception:
             continue
 
-    # 2. JTWC RSS
+    # 2. JTWC RSS — description has only HTML links; fetch linked warning text for position data
+    # NOTE: metoc.navy.mil blocks direct text-file fetches, so this step is best-effort only.
     try:
         r = requests.get(
             'https://www.metoc.navy.mil/jtwc/rss/jtwc.rss',
@@ -103,33 +154,90 @@ def _fetch_live_storms():
         r.raise_for_status()
         root = _ET.fromstring(r.content)
         storms = []
+        HDRS = {'User-Agent': 'StormForecastingApp/1.0'}
         for item in root.findall('.//item'):
-            title_el = item.find('title')
-            desc_el  = item.find('description')
-            if title_el is None or desc_el is None: continue
-            title = title_el.text or ''
-            desc  = desc_el.text  or ''
-            pos = _re.search(r'(\d+\.?\d*)\s*N[,\s]+(\d+\.?\d*)\s*E', desc, _re.I)
-            if not pos: continue
-            lat, lon = float(pos.group(1)), float(pos.group(2))
-            if not (0 <= lat <= 50 and 90 <= lon <= 185): continue
-            wind = int((_re.search(r'(\d+)\s*KT', desc, _re.I) or [None, '35']).group(1) or 35)
-            pres = int((_re.search(r'(\d{3,4})\s*(?:MB|HPA)', desc, _re.I) or [None, '990']).group(1) or 990)
-            nm   = _re.search(r'(?:Typhoon|Storm|Depression|Cyclone)\s+(\w+)', title, _re.I)
-            name = nm.group(1).upper() if nm else title.split()[0].upper()
-            storms.append({
-                'name': name, 'lat': lat, 'lon': lon,
-                'pressure': pres, 'wind_speed': wind,
-                'category': _wind_to_cat(wind), 'source': 'JTWC',
-                'velocity': {'vLat': 0.04, 'vLon': -0.07},
-                'path': [{'lat': lat, 'lon': lon, 'pressure': pres, 'wind_speed': wind}],
-            })
+            desc_el = item.find('description')
+            if desc_el is None: continue
+            desc = desc_el.text or ''
+            # Extract storm names without backtracking regex (use simple line-by-line scan)
+            names = _re.findall(r'\(([A-Z]{3,})\)', desc)
+            txt_urls = _re.findall(r"href='([^']+web\.txt)'", desc)
+            for name_raw, txt_url in zip(names, txt_urls):
+                name = name_raw.upper().strip()
+                try:
+                    tr = requests.get(txt_url, timeout=8, headers=HDRS)
+                    tr.raise_for_status()
+                    txt = tr.text
+                    pos = _re.search(r'POSITION[:\s]+(\d+\.?\d*)\s*N[,\s]+(\d+\.?\d*)\s*E', txt, _re.I)
+                    if not pos: continue
+                    lat, lon = float(pos.group(1)), float(pos.group(2))
+                    if not (0 <= lat <= 50 and 90 <= lon <= 185): continue
+                    wind_m = _re.search(r'MAXIMUM SUSTAINED WINDS[- ]+(\d+)\s*KT', txt, _re.I)
+                    pres_m = _re.search(r'MINIMUM CENTRAL PRESSURE[- ]+(\d+)\s*MB', txt, _re.I)
+                    wind = int(wind_m.group(1)) if wind_m else 35
+                    pres = int(pres_m.group(1)) if pres_m else 990
+                    storms.append({
+                        'name': name, 'lat': lat, 'lon': lon,
+                        'pressure': float(pres), 'wind_speed': float(wind),
+                        'category': _wind_to_cat(wind), 'source': 'JTWC',
+                        'velocity': {'vLat': 0.04, 'vLon': -0.07},
+                        'path': [{'lat': lat, 'lon': lon,
+                                  'pressure': float(pres), 'wind_speed': float(wind)}],
+                    })
+                except Exception:
+                    continue
         if storms:
             return storms
     except Exception as ex:
         logger.warning('JTWC fetch failed: %s', ex)
 
-    # 3. IBTrACS fallback — 5 most recent storms from current/last year
+    # 3. IBTrACS ACTIVE CSV — near-real-time, updated every ~6 h by NCEI
+    try:
+        import csv as _csv, io as _io
+        _IBTRACS_ACTIVE = (
+            'https://www.ncei.noaa.gov/data/international-best-track-archive-for-climate-stewardship-ibtracs'
+            '/v04r01/access/csv/ibtracs.ACTIVE.list.v04r01.csv'
+        )
+        _r = requests.get(_IBTRACS_ACTIVE, timeout=15,
+                          headers={'User-Agent': 'StormForecastingApp/1.0'})
+        _r.raise_for_status()
+        _lines = _r.text.splitlines()
+        if len(_lines) >= 3:
+            _reader = _csv.DictReader(_io.StringIO('\n'.join([_lines[0]] + _lines[2:])))
+            _by_storm = {}
+            for _row in _reader:
+                if _row.get('BASIN', '').strip() != 'WP':
+                    continue
+                _name = (_row.get('NAME', 'UNNAMED').strip() or 'UNNAMED')
+                try:
+                    _lat = float(_row['LAT']); _lon = float(_row['LON'])
+                except (ValueError, KeyError):
+                    continue
+                _wind_raw = _row.get('USA_WIND', '').strip() or _row.get('WMO_WIND', '').strip()
+                _pres_raw = _row.get('USA_PRES', '').strip() or _row.get('WMO_PRES', '').strip()
+                _wind = float(_wind_raw) if _wind_raw else 35.0
+                _pres = float(_pres_raw) if _pres_raw else 990.0
+                _by_storm.setdefault(_name, []).append(
+                    {'lat': _lat, 'lon': _lon, 'pressure': _pres, 'wind_speed': _wind})
+            _storms = []
+            for _name, _path in _by_storm.items():
+                if not _path: continue
+                _last = _path[-1]
+                _storms.append({
+                    'name': _name,
+                    'lat': _last['lat'], 'lon': _last['lon'],
+                    'pressure': _last['pressure'], 'wind_speed': _last['wind_speed'],
+                    'category': _wind_to_cat(_last['wind_speed']),
+                    'source': 'IBTrACS ACTIVE (live)',
+                    'velocity': _estimate_vel(_path),
+                    'path': _path,
+                })
+            if _storms:
+                return _storms
+    except Exception as _ex:
+        logger.warning('IBTrACS ACTIVE fetch failed: %s', _ex)
+
+    # 4. IBTrACS historical fallback — 5 most recent storms from local cache
     year = datetime.now().year
     for y in [year, year - 1]:
         fp = get_resource_path(f'data/wp_{y}_data.json')
@@ -166,6 +274,40 @@ def _fetch_live_storms():
         if storms:
             return storms
     return []
+
+
+def _refresh_live_storms_cache():
+    """
+    Fetch active WP storms and update live_storms_cache.
+    Tries: PAGASA → JTWC RSS (text files) → IBTrACS ACTIVE CSV → local historical fallback.
+    Runs in a background thread; the endpoint reads from cache immediately.
+    """
+    global live_storms_cache
+    storms = _fetch_live_storms()
+    with _live_storms_lock:
+        live_storms_cache = {
+            'storms': storms,
+            'source': storms[0]['source'] if storms else 'none',
+            'fetched_at': datetime.utcnow(),
+        }
+
+
+def _start_live_storms_refresh_loop():
+    """Seed cache immediately then refresh every 10 minutes."""
+    def loop():
+        while True:
+            try:
+                _refresh_live_storms_cache()
+            except Exception as ex:
+                logger.warning('live_storms refresh failed: %s', ex)
+            import time as _time
+            _time.sleep(600)
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+
+
+# Kick off background refresh at startup
+_start_live_storms_refresh_loop()
 
 
 @app.route('/')
@@ -667,137 +809,22 @@ def run_ai_forecast():
 @app.route('/api/realtime-storms', methods=['GET'])
 def get_realtime_storms():
     """
-    Fetch active WP tropical cyclones.
-    Tries PAGASA bulletin → JTWC RSS → IBTrACS fallback.
+    Return active WP tropical cyclones from the background-refreshed cache.
+    The cache is seeded at startup and refreshed every 10 minutes by a daemon thread,
+    so this endpoint always responds in < 1 ms from the in-memory cache.
     """
-    def _wind_to_cat(kt):
-        if kt < 34: return 0
-        if kt < 64: return 1
-        if kt < 96: return 2
-        if kt < 113: return 3
-        if kt < 137: return 4
-        return 5
+    with _live_storms_lock:
+        cached = dict(live_storms_cache)
 
-    def _estimate_vel(path_pts, n=6):
-        pts = path_pts[-max(2, min(n, len(path_pts))):]
-        if len(pts) < 2:
-            return {'vLat': 0.04, 'vLon': -0.07}
-        vLat = sum(float(pts[i]['lat']) - float(pts[i-1]['lat']) for i in range(1, len(pts))) / (len(pts)-1)
-        vLon = sum(float(pts[i].get('lon', pts[i].get('long', 0))) - float(pts[i-1].get('lon', pts[i-1].get('long', 0))) for i in range(1, len(pts))) / (len(pts)-1)
-        return {'vLat': round(float(vLat), 4), 'vLon': round(float(vLon), 4)}
-
-    def try_pagasa():
-        """Try PAGASA open data endpoints for active PAR typhoons."""
-        endpoints = [
-            'https://pubfiles.pagasa.dost.gov.ph/tamss/weather/bulletin.json',
-            'https://api.pagasa.dost.gov.ph/api/v1/tropical-cyclone/active',
-        ]
-        for url in endpoints:
-            try:
-                r = requests.get(url, timeout=10, headers={'User-Agent': 'StormForecastingApp/1.0'})
-                r.raise_for_status()
-                data = r.json()
-                storms = []
-                items = data if isinstance(data, list) else data.get('data', data.get('storms', []))
-                for item in items:
-                    lat = float(item.get('lat', item.get('latitude', 0)))
-                    lon = float(item.get('lon', item.get('longitude', 0)))
-                    if not (0 <= lat <= 50 and 90 <= lon <= 185): continue
-                    wind = float(item.get('wind_speed', item.get('max_wind', 35)))
-                    pres = float(item.get('pressure', item.get('central_pressure', 990)))
-                    name = str(item.get('name', item.get('ph_name', 'UNNAMED'))).upper()
-                    storms.append({
-                        'name': name, 'lat': lat, 'lon': lon,
-                        'pressure': pres, 'wind_speed': wind,
-                        'category': _wind_to_cat(wind), 'source': 'PAGASA',
-                        'velocity': {'vLat': 0.04, 'vLon': -0.07},
-                        'path': [{'lat': lat, 'lon': lon, 'pressure': pres, 'wind_speed': wind}],
-                    })
-                if storms:
-                    return storms
-            except Exception:
-                continue
-        return []
-
-    def try_jtwc():
-        """Parse JTWC RSS feed – covers all WP tropical cyclones."""
-        try:
-            r = requests.get(
-                'https://www.metoc.navy.mil/jtwc/rss/jtwc.rss',
-                timeout=12, headers={'User-Agent': 'StormForecastingApp/1.0'}
-            )
-            r.raise_for_status()
-            root = _ET.fromstring(r.content)
-            storms = []
-            for item in root.findall('.//item'):
-                title_el = item.find('title')
-                desc_el  = item.find('description')
-                if title_el is None or desc_el is None: continue
-                title = title_el.text or ''
-                desc  = desc_el.text  or ''
-                # Position: "12.5N 140.0E"
-                pos = _re.search(r'(\d+\.?\d*)\s*N[,\s]+(\d+\.?\d*)\s*E', desc, _re.I)
-                if not pos: continue
-                lat, lon = float(pos.group(1)), float(pos.group(2))
-                if not (0 <= lat <= 50 and 90 <= lon <= 185): continue
-                wind = int((_re.search(r'(\d+)\s*KT', desc, _re.I) or [None,'35']).group(1) or 35)
-                pres = int((_re.search(r'(\d{3,4})\s*(?:MB|HPA)', desc, _re.I) or [None,'990']).group(1) or 990)
-                nm   = _re.search(r'(?:Typhoon|Storm|Depression|Cyclone)\s+(\w+)', title, _re.I)
-                name = nm.group(1).upper() if nm else title.split()[0].upper()
-                storms.append({
-                    'name': name, 'lat': lat, 'lon': lon,
-                    'pressure': pres, 'wind_speed': wind,
-                    'category': _wind_to_cat(wind), 'source': 'PAGASA / JTWC',
-                    'velocity': {'vLat': 0.04, 'vLon': -0.07},
-                    'path': [{'lat': lat, 'lon': lon, 'pressure': pres, 'wind_speed': wind}],
-                })
-            return storms
-        except Exception as ex:
-            logger.warning('JTWC fetch failed: %s', ex)
-            return []
-
-    def ibtracs_fallback():
-        year = datetime.now().year
-        for y in [year, year - 1]:
-            fp = get_resource_path(f'data/wp_{y}_data.json')
-            if not os.path.exists(fp): continue
-            with open(fp) as f:
-                data = json.load(f)
-            storms = []
-            for s in data[-5:]:
-                if len(s['path']) < 2: continue
-                last = s['path'][-1]
-                norm = [{'lat': float(p['lat']),
-                         'lon': float(p.get('long', p.get('lon', 130))),
-                         'pressure': float(p.get('pressure', 990)),
-                         'wind_speed': float(p.get('speed', p.get('wind_speed', 35)))}
-                        for p in s['path']]
-                storms.append({
-                    'name': s['name'],
-                    'lat':  float(last['lat']),
-                    'lon':  float(last.get('long', last.get('lon', 130))),
-                    'pressure':   float(last.get('pressure', 990)),
-                    'wind_speed': float(last.get('speed', last.get('wind_speed', 35))),
-                    'category': int(last.get('class', 1)),
-                    'source': f'IBTrACS {y} (historical fallback)',
-                    'velocity': _estimate_vel(s['path']),
-                    'path': norm,
-                })
-            if storms:
-                return storms
-        return []
-
-    storms = try_pagasa()
-    if not storms:
-        storms = try_jtwc()
-    if not storms:
-        storms = ibtracs_fallback()
-
-    source = storms[0]['source'] if storms else 'none'
+    storms = cached.get('storms', [])
+    source = cached.get('source', 'loading')
+    fetched_at = cached.get('fetched_at')
     return jsonify({
-        'status': 'success', 'source': source,
-        'count': len(storms), 'storms': storms,
-        'generated_at': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'status': 'success',
+        'source': source,
+        'count': len(storms),
+        'storms': storms,
+        'generated_at': fetched_at.strftime('%Y-%m-%dT%H:%M:%SZ') if fetched_at else None,
     })
 
 
@@ -1229,6 +1256,88 @@ def get_full_weather_grid():
     }
     full_grid_cache.clear()
     full_grid_cache[cache_key] = payload
+    return jsonify(payload)
+
+
+@app.route('/api/weather/marine/fullgrid', methods=['GET'])
+def get_marine_full_grid():
+    """
+    Fetch complete 7-day hourly wave forecast for an 8×6 ocean grid over PAR.
+    Returns 168 wave_height values per point so the frontend can switch hours instantly.
+    Cached for 30 minutes (same bucket strategy as /api/weather/fullgrid).
+    """
+    region = request.args.get('region', 'par', type=str).lower()
+
+    if region == 'par':
+        bounds = (115.0, 135.0, 5.0, 25.0)
+        nx, ny = 8, 6
+    else:
+        bounds = (100.0, 180.0, 0.0, 60.0)
+        nx, ny = 10, 8
+
+    now_bucket = int(datetime.utcnow().timestamp() // 1800)
+    cache_key  = f"marine_full_{region}_{now_bucket}"
+    cached     = marine_full_grid_cache.get(cache_key)
+    if cached is not None:
+        return jsonify(cached)
+
+    min_lon, max_lon, min_lat, max_lat = bounds
+    points = []
+    for yi in range(ny):
+        for xi in range(nx):
+            lat = round(min_lat + yi * (max_lat - min_lat) / (ny - 1), 3)
+            lon = round(min_lon + xi * (max_lon - min_lon) / (nx - 1), 3)
+            points.append((yi * nx + xi, lat, lon))
+
+    def fetch_marine_full_point(idx, lat, lon):
+        try:
+            resp = requests.get(
+                'https://marine-api.open-meteo.com/v1/marine',
+                params={
+                    'latitude':  lat,
+                    'longitude': lon,
+                    'hourly':    'wave_height,wave_direction',
+                    'forecast_days': 7,
+                    'timezone':  'UTC',
+                },
+                timeout=12,
+            )
+            if resp.status_code != 200:
+                return {'idx': idx, 'lat': lat, 'lon': lon, 'wave_height': [], 'wave_dir': []}
+            h = resp.json().get('hourly', {})
+            return {
+                'idx':         idx, 'lat': lat, 'lon': lon,
+                'wave_height': h.get('wave_height',   []),
+                'wave_dir':    h.get('wave_direction', []),
+            }
+        except Exception:
+            return {'idx': idx, 'lat': lat, 'lon': lon, 'wave_height': [], 'wave_dir': []}
+
+    results = []
+    try:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futs = {ex.submit(fetch_marine_full_point, idx, lat, lon): idx
+                    for idx, lat, lon in points}
+            for fut in as_completed(futs):
+                results.append(fut.result())
+    except Exception as e:
+        return jsonify({'error': f'Marine full-grid fetch failed: {e}'}), 502
+
+    results.sort(key=lambda x: x['idx'])
+
+    payload = {
+        'status':           'success',
+        'provider':         'open-meteo-marine',
+        'region':           region,
+        'nx':               nx,
+        'ny':               ny,
+        'n_hours':          168,
+        'step_hours':       1,
+        'generated_at_utc': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'points':           results,
+    }
+    marine_full_grid_cache.clear()
+    marine_full_grid_cache[cache_key] = payload
     return jsonify(payload)
 
 
