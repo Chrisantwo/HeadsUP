@@ -72,3 +72,38 @@ flips `run_forecast()` from `"method": "physics"` to `"method": "ml"`.
 - Training a per-grid RF wind-field model.
 - Any change to the frontend or Flask routes.
 - Hyperparameter search beyond sensible defaults.
+
+## Update (2026-08-03) — hybrid "LSTM corrects physics"
+
+The first cut trained the LSTM to predict the absolute next position and rolled
+it out autoregressively. Single-step it beat a naive persistence, but the
+multi-step backtest (via ai_models.run_forecast, apples-to-apples with the
+physics baseline) showed **negative skill at every operational lead** (−0.38 at
+6h): compounding error made it worse than simple persistence.
+
+Fix: reformulate as **residual-over-physics**. The LSTM now predicts the
+*correction* to the exponentially-weighted persistence baseline:
+
+    next_state = persistence_step(window) + LSTM_correction(window)
+
+- `persistence_step()` lives in `ai_models.py` and is imported by
+  `train_lstm.py`, so training and inference share the identical baseline.
+- New artifacts: `lstm_resid_scaler.pkl` (StandardScaler on residuals) and
+  `lstm_meta.json` (`{"mode": "residual_over_physics", "T": 8, ...}`).
+- `ai_models._run_ml_forecast` dispatches on `lstm_meta.json`: hybrid rollout
+  when mode is `residual_over_physics`, else the legacy absolute rollout.
+
+Result (2023–2025 held-out, 67 storms) — the hybrid **beats persistence at the
+operationally critical short leads**:
+
+| Lead | LSTM RMSE (km) | Physics RMSE (km) | Skill |
+|-----:|---------------:|------------------:|------:|
+| 6h   | 47.2  | 60.2  | +0.22 |
+| 12h  | 107.2 | 129.1 | +0.17 |
+| 24h  | 244.0 | 268.2 | +0.09 |
+| 48h  | 589.9 | 569.8 | −0.04 |
+| 72h+ | worse | better | negative |
+
+Honest framing for the thesis: the hybrid LSTM improves 0–24h track forecasts
+by 9–22% over persistence; at long range (48h+) both degrade and physics is
+marginally smoother.

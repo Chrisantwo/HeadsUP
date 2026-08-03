@@ -1,0 +1,19 @@
+{
+  "mode": "residual_over_physics",
+  "T": 8,
+  "features": [
+    "lat",
+    "lon",
+    "pressure",
+    "wind_speed"
+  ],
+  "persist_weight_span": 2.0,
+  "train_years": [
+    2013,
+    2022
+  ],
+  "val_years": [
+    2023,
+    2025
+  ]
+}

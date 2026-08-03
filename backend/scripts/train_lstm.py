@@ -1,16 +1,24 @@
 """
 Train the LSTM path model for the HeadsUp 7-day typhoon forecast.
 
+HYBRID design — "LSTM corrects physics" (residual-over-physics):
+    next_state = persistence_step(window) + LSTM_correction(window)
+
+The LSTM is trained to predict the *residual* that the exponentially-weighted
+persistence baseline leaves behind, NOT the absolute next position. At inference
+(ai_models.py) the same persistence_step carries the trajectory and the LSTM
+only nudges it, so the autoregressive rollout cannot drift far worse than
+persistence — which fixes the compounding-error problem of a plain LSTM.
+
 Produces, in backend/models/:
-    lstm_path_model.keras   – Keras model (primary; loaded by ai_models.py)
-    lstm_path_model.h5      – same model, .h5 fallback path
-    lstm_scaler.pkl         – sklearn MinMaxScaler used at train + inference time
+    lstm_path_model.keras    – maps normalised (1,T,4) window -> normalised (4,) residual
+    lstm_path_model.h5       – same model, .h5 fallback path
+    lstm_scaler.pkl          – MinMaxScaler for the INPUT features
+    lstm_resid_scaler.pkl    – StandardScaler for the residual target
+    lstm_meta.json           – {"mode": "residual_over_physics", "T": ...}
 
-The output matches the Mode-A contract in ai_models.py exactly:
-    input  (1, T, 4)  features [lat, lon, pressure, wind_speed]
-    output (1, 4)     next-step [lat, lon, pressure, wind_speed]
-
-Run once from the backend directory:
+persistence_step() is imported from ai_models so training and inference use the
+IDENTICAL physics baseline. Run once from the backend directory:
     python scripts/train_lstm.py
 """
 
@@ -20,8 +28,11 @@ import json
 import math
 import numpy as np
 
+# ai_models lives beside this script; import it for the shared persistence step.
+import ai_models
+
 # --------------------------------------------------------------------------
-# Paths (mirror ai_models.py / backtest.py layout)
+# Paths
 # --------------------------------------------------------------------------
 BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR  = os.path.join(BASE_DIR, "data")
@@ -34,9 +45,8 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 T             = 8                       # input steps (8 x 3h = 24h of history)
 TRAIN_YEARS   = list(range(2013, 2023)) # 2013-2022
 VAL_YEARS     = list(range(2023, 2026)) # 2023-2025 (held out)
-FEATURES      = ("lat", "lon", "pressure", "wind_speed")
 EARTH_R_KM    = 6371.0
-EPOCHS        = 80
+EPOCHS        = 120
 BATCH_SIZE    = 128
 SEED          = 42
 
@@ -65,14 +75,12 @@ def _load_year(year):
 
 def _storm_to_seq(storm):
     """Convert one storm's path to an (N, 4) array [lat, lon, pressure, wind]."""
-    pts = storm.get("path", [])
     rows = []
-    for p in pts:
+    for p in storm.get("path", []):
         lat  = _parse_float(p.get("lat"))
         lon  = _parse_float(p.get("long"))
         pres = _parse_float(p.get("pressure", 1010), 1010.0)
         wind = _parse_float(p.get("speed", 0), 0.0)
-        # Skip obviously invalid points
         if lat == 0.0 and lon == 0.0:
             continue
         rows.append([lat, lon, pres, wind])
@@ -80,7 +88,6 @@ def _storm_to_seq(storm):
 
 
 def _load_sequences(years):
-    """Return a list of (N, 4) storm sequences for the given years."""
     seqs = []
     for yr in years:
         for storm in _load_year(yr):
@@ -100,6 +107,19 @@ def _make_windows(seqs):
     return np.asarray(X, dtype=np.float64), np.asarray(y, dtype=np.float64)
 
 
+def _persistence_batch(X):
+    """persistence_step applied to every window in X -> (M, 4) baseline preds."""
+    return np.array([ai_models.persistence_step(w) for w in X], dtype=np.float64)
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    lat1, lon1, lat2, lon2 = map(np.radians, (lat1, lon1, lat2, lon2))
+    dphi = lat2 - lat1
+    dlam = lon2 - lon1
+    a = np.sin(dphi/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlam/2)**2
+    return 2 * EARTH_R_KM * np.arcsin(np.sqrt(a))
+
+
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
@@ -114,62 +134,52 @@ def main():
     X_train_raw, y_train_raw = _make_windows(train_seqs)
     X_val_raw,   y_val_raw   = _make_windows(val_seqs)
     print(f"  train windows: {len(X_train_raw)} | val windows: {len(X_val_raw)}")
-
     if len(X_train_raw) == 0:
         raise SystemExit("No training windows produced — check data files.")
 
-    # ---- Fit MinMaxScaler on TRAIN features only -------------------------
-    from sklearn.preprocessing import MinMaxScaler
+    # ---- Physics baseline + residual targets -----------------------------
+    phys_train = _persistence_batch(X_train_raw)          # (M, 4)
+    phys_val   = _persistence_batch(X_val_raw) if len(X_val_raw) else phys_train[:0]
+    resid_train = y_train_raw - phys_train                # LSTM learns this
+    resid_val   = (y_val_raw - phys_val) if len(X_val_raw) else resid_train[:0]
+
+    # ---- Scalers: MinMax for inputs, Standard for residual target --------
+    from sklearn.preprocessing import MinMaxScaler, StandardScaler
     import joblib
 
-    scaler = MinMaxScaler()
-    flat_train = X_train_raw.reshape(-1, 4)      # (M*T, 4)
-    scaler.fit(flat_train)
+    in_scaler = MinMaxScaler().fit(X_train_raw.reshape(-1, 4))
+    rs_scaler = StandardScaler().fit(resid_train)
 
     def _scale_X(X):
-        return scaler.transform(X.reshape(-1, 4)).reshape(X.shape).astype(np.float32)
-
-    def _scale_y(yv):
-        return scaler.transform(yv).astype(np.float32)
+        return in_scaler.transform(X.reshape(-1, 4)).reshape(X.shape).astype(np.float32)
 
     X_train = _scale_X(X_train_raw)
-    y_train = _scale_y(y_train_raw)
-    X_val   = _scale_X(X_val_raw)   if len(X_val_raw)   else X_train[:0]
-    y_val   = _scale_y(y_val_raw)   if len(y_val_raw)   else y_train[:0]
+    y_train = rs_scaler.transform(resid_train).astype(np.float32)
+    X_val   = _scale_X(X_val_raw)                if len(X_val_raw) else X_train[:0]
+    y_val   = rs_scaler.transform(resid_val).astype(np.float32) if len(X_val_raw) else y_train[:0]
 
-    # ---- Build model -----------------------------------------------------
-    # Residual formulation: the LSTM predicts the *displacement* from the last
-    # known (normalised) state, and an Add layer reconstructs the absolute
-    # next-step state. This keeps the ai_models.py Mode-A contract (model still
-    # outputs absolute normalised [lat, lon, pressure, wind]) while giving the
-    # network the far easier job of learning a small delta -> it starts at
-    # persistence accuracy and improves from there.
-    # Cropping1D (not Lambda) extracts the last timestep so the model
-    # deserialises cleanly under Keras 3 safe_mode (ai_models.py loads with
-    # tf.keras.models.load_model).
+    # ---- Model: window -> normalised residual ----------------------------
     import tensorflow as tf
     tf.random.set_seed(SEED)
-    from tensorflow.keras import layers, Model
+    from tensorflow.keras import layers, models
 
-    inp   = layers.Input(shape=(T, 4))
-    last  = layers.Cropping1D(cropping=(T - 1, 0))(inp)   # keep final timestep
-    last  = layers.Flatten()(last)                        # (batch, 4)
-    x     = layers.LSTM(64)(inp)
-    x     = layers.Dropout(0.2)(x)
-    x     = layers.Dense(32, activation="relu")(x)
-    delta = layers.Dense(4)(x)                            # displacement
-    out   = layers.Add()([last, delta])                   # absolute next-step
-    model = Model(inp, out)
+    model = models.Sequential([
+        layers.Input(shape=(T, 4)),
+        layers.LSTM(64),
+        layers.Dropout(0.2),
+        layers.Dense(32, activation="relu"),
+        layers.Dense(4),               # normalised residual [dlat, dlon, dpres, dwind]
+    ])
     model.compile(optimizer="adam", loss="mse", metrics=["mae"])
     model.summary()
 
     callbacks = [
         tf.keras.callbacks.EarlyStopping(
             monitor="val_loss" if len(X_val) else "loss",
-            patience=8, restore_best_weights=True),
+            patience=10, restore_best_weights=True),
     ]
 
-    print("\nTraining...")
+    print("\nTraining (residual-over-physics)...")
     model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val) if len(X_val) else None,
@@ -180,32 +190,40 @@ def main():
     # ---- Save artifacts --------------------------------------------------
     keras_path  = os.path.join(MODEL_DIR, "lstm_path_model.keras")
     h5_path     = os.path.join(MODEL_DIR, "lstm_path_model.h5")
-    scaler_path = os.path.join(MODEL_DIR, "lstm_scaler.pkl")
+    in_path     = os.path.join(MODEL_DIR, "lstm_scaler.pkl")
+    rs_path     = os.path.join(MODEL_DIR, "lstm_resid_scaler.pkl")
+    meta_path   = os.path.join(MODEL_DIR, "lstm_meta.json")
 
     model.save(keras_path)
     model.save(h5_path)
-    joblib.dump(scaler, scaler_path)
-    print(f"\nSaved:\n  {keras_path}\n  {h5_path}\n  {scaler_path}")
+    joblib.dump(in_scaler, in_path)
+    joblib.dump(rs_scaler, rs_path)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "mode":               "residual_over_physics",
+            "T":                  T,
+            "features":           ["lat", "lon", "pressure", "wind_speed"],
+            "persist_weight_span": ai_models.PERSIST_WEIGHT_SPAN,
+            "train_years":        [TRAIN_YEARS[0], TRAIN_YEARS[-1]],
+            "val_years":          [VAL_YEARS[0], VAL_YEARS[-1]],
+        }, f, indent=2)
+    print(f"\nSaved:\n  {keras_path}\n  {h5_path}\n  {in_path}\n  {rs_path}\n  {meta_path}")
 
-    # ---- Held-out next-step track error (km) -----------------------------
+    # ---- Held-out next-step track error ----------------------------------
     if len(X_val):
-        pred_norm = model.predict(X_val, verbose=0)
-        pred = scaler.inverse_transform(pred_norm)          # back to physical
-        true = y_val_raw
-        km = _haversine_km(true[:, 0], true[:, 1], pred[:, 0], pred[:, 1])
+        resid_pred = rs_scaler.inverse_transform(model.predict(X_val, verbose=0))
+        hybrid = phys_val + resid_pred                    # physics + correction
+        km_hybrid = _haversine_km(y_val_raw[:, 0], y_val_raw[:, 1],
+                                  hybrid[:, 0],     hybrid[:, 1])
+        km_phys   = _haversine_km(y_val_raw[:, 0], y_val_raw[:, 1],
+                                  phys_val[:, 0],   phys_val[:, 1])
         print("\nHeld-out next-step (3h) track error:")
-        print(f"  MAE  : {km.mean():8.2f} km")
-        print(f"  RMSE : {math.sqrt((km**2).mean()):8.2f} km")
-        print(f"  P50  : {np.percentile(km, 50):8.2f} km")
-        print(f"  P90  : {np.percentile(km, 90):8.2f} km")
-
-
-def _haversine_km(lat1, lon1, lat2, lon2):
-    lat1, lon1, lat2, lon2 = map(np.radians, (lat1, lon1, lat2, lon2))
-    dphi = lat2 - lat1
-    dlam = lon2 - lon1
-    a = np.sin(dphi/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlam/2)**2
-    return 2 * EARTH_R_KM * np.arcsin(np.sqrt(a))
+        print(f"  Persistence : MAE {km_phys.mean():7.2f} km | RMSE {math.sqrt((km_phys**2).mean()):7.2f}")
+        print(f"  Hybrid LSTM : MAE {km_hybrid.mean():7.2f} km | RMSE {math.sqrt((km_hybrid**2).mean()):7.2f}"
+              f" | P50 {np.percentile(km_hybrid,50):.2f} | P90 {np.percentile(km_hybrid,90):.2f}")
+        skill = 1 - math.sqrt((km_hybrid**2).mean()) / math.sqrt((km_phys**2).mean())
+        print(f"  Single-step skill vs persistence: {skill:+.4f}  "
+              f"({'LSTM wins' if skill > 0 else 'persistence wins'})")
 
 
 if __name__ == "__main__":

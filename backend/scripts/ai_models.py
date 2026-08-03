@@ -40,11 +40,18 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _ROOT       = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR  = os.path.join(_ROOT, "models")
-LSTM_PATH   = os.path.join(MODELS_DIR, "lstm_path_model.h5")
-LSTM_PATH_K = os.path.join(MODELS_DIR, "lstm_path_model.keras")
-RF_PATH     = os.path.join(MODELS_DIR, "rf_wind_model.pkl")
-LSTM_SCALER = os.path.join(MODELS_DIR, "lstm_scaler.pkl")
-RF_SCALER   = os.path.join(MODELS_DIR, "rf_scaler.pkl")
+LSTM_PATH        = os.path.join(MODELS_DIR, "lstm_path_model.h5")
+LSTM_PATH_K      = os.path.join(MODELS_DIR, "lstm_path_model.keras")
+RF_PATH          = os.path.join(MODELS_DIR, "rf_wind_model.pkl")
+LSTM_SCALER      = os.path.join(MODELS_DIR, "lstm_scaler.pkl")
+LSTM_RESID_SCALER = os.path.join(MODELS_DIR, "lstm_resid_scaler.pkl")
+LSTM_META        = os.path.join(MODELS_DIR, "lstm_meta.json")
+RF_SCALER        = os.path.join(MODELS_DIR, "rf_scaler.pkl")
+
+# Exponential-weighting half-life (in steps) for the persistence baseline.
+# Must stay identical between training (train_lstm.py) and inference so the
+# hybrid "physics + LSTM correction" is self-consistent.
+PERSIST_WEIGHT_SPAN = 2.0   # np.exp(linspace(0, SPAN, n)) weights, recent-heavy
 
 # ---------------------------------------------------------------------------
 # Grid & forecast constants
@@ -69,10 +76,12 @@ _NORM = {
 # ---------------------------------------------------------------------------
 # Lazy ML singletons
 # ---------------------------------------------------------------------------
-_lstm        = None
-_rf          = None
-_lstm_scaler = None
-_rf_scaler   = None
+_lstm              = None
+_rf                = None
+_lstm_scaler       = None
+_lstm_resid_scaler = None
+_lstm_meta         = None
+_rf_scaler         = None
 
 # ---------------------------------------------------------------------------
 # Pre-built PAR meshgrid (at import time)
@@ -82,6 +91,40 @@ _lon_1d          = np.linspace(PAR_LON_MIN, PAR_LON_MAX, GRID_N)
 _glon_2d, _glat_2d = np.meshgrid(_lon_1d, _lat_1d)   # (20, 20) each
 _glat_f          = _glat_2d.ravel()   # (400,)
 _glon_f          = _glon_2d.ravel()   # (400,)
+
+
+# ---------------------------------------------------------------------------
+# Shared persistence baseline (hybrid "physics + LSTM correction")
+# ---------------------------------------------------------------------------
+def persistence_step(window):
+    """
+    One-step-ahead persistence prediction for a (T, 4) physical window of
+    [lat, lon, pressure, wind_speed]. Predicts next = last + exponentially
+    weighted mean of recent per-step deltas (recent steps weighted highest).
+
+    This is the SAME baseline the LSTM is trained to correct — train_lstm.py
+    imports this function so training and inference use identical physics.
+    Returns a (4,) float array.
+    """
+    w = np.asarray(window, dtype=np.float64)
+    if w.shape[0] < 2:
+        return w[-1].copy()
+    diffs   = np.diff(w, axis=0)                                   # (T-1, 4)
+    weights = np.exp(np.linspace(0.0, PERSIST_WEIGHT_SPAN, len(diffs)))
+    weights /= weights.sum()
+    vel = (weights[:, None] * diffs).sum(axis=0)                   # (4,)
+    return w[-1] + vel
+
+
+def _clip_state(state):
+    """Clamp a predicted [lat, lon, pressure, wind] to physically sane ranges."""
+    lat, lon, pres, wind = state
+    return np.array([
+        float(np.clip(lat,  -5.0,   55.0)),
+        float(np.clip(lon,  100.0, 180.0)),
+        float(np.clip(pres, 870.0, 1015.0)),
+        float(np.clip(wind,  15.0,  195.0)),
+    ], dtype=np.float64)
 
 
 # ---------------------------------------------------------------------------
@@ -131,15 +174,34 @@ def _load_rf():
 
 
 def _load_scalers():
-    global _lstm_scaler, _rf_scaler
+    global _lstm_scaler, _rf_scaler, _lstm_resid_scaler
     try:
         import joblib
         if _lstm_scaler is None and os.path.exists(LSTM_SCALER):
             _lstm_scaler = joblib.load(LSTM_SCALER)
+        if _lstm_resid_scaler is None and os.path.exists(LSTM_RESID_SCALER):
+            _lstm_resid_scaler = joblib.load(LSTM_RESID_SCALER)
         if _rf_scaler is None and os.path.exists(RF_SCALER):
             _rf_scaler   = joblib.load(RF_SCALER)
     except Exception as exc:
         logger.warning("Scaler load failed, using hardcoded ranges: %s", exc)
+
+
+def _load_meta():
+    """Load lstm_meta.json describing the model's prediction mode. Missing
+    file -> legacy absolute-position model."""
+    global _lstm_meta
+    if _lstm_meta is not None:
+        return _lstm_meta
+    _lstm_meta = {"mode": "absolute"}
+    try:
+        if os.path.exists(LSTM_META):
+            import json
+            with open(LSTM_META, "r", encoding="utf-8") as f:
+                _lstm_meta = json.load(f)
+    except Exception as exc:
+        logger.warning("LSTM meta load failed (%s); assuming absolute mode.", exc)
+    return _lstm_meta
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +232,40 @@ def _prepare_window(history, expected_len):
     else:
         seq = np.concatenate([np.zeros((expected_len - n, 4), np.float32), normed])
     return seq[np.newaxis]   # (1, T, 4)
+
+def _phys_window(history, T):
+    """
+    Last T physical [lat, lon, pressure, wind_speed] rows from history, padded
+    at the front by repeating the earliest point when history is shorter than T.
+    Used by the hybrid rollout, which operates in physical (not normalised) space.
+    """
+    raw = np.array([[float(p["lat"]), float(p["lon"]),
+                     float(p["pressure"]), float(p["wind_speed"])]
+                    for p in history], dtype=np.float64)
+    n = len(raw)
+    if n >= T:
+        return raw[-T:]
+    pad = np.repeat(raw[:1], T - n, axis=0)
+    return np.concatenate([pad, raw], axis=0)
+
+
+def _wind_field(pred_lat, pred_lon, pred_pres, pred_wind, rf):
+    """Wind field for one forecast step: RF regressor if given, else Rankine."""
+    if rf is not None:
+        X_rf = _build_rf_features(pred_lat, pred_lon, pred_pres, pred_wind)
+        if _rf_scaler is not None:
+            X_rf = _rf_scaler.transform(X_rf).astype(np.float32)
+        uv = rf.predict(X_rf)
+        if uv.ndim == 1:
+            u_flat, v_flat = uv.ravel(), np.zeros_like(uv)
+        elif uv.shape[1] == 1:
+            u_flat, v_flat = uv[:, 0], np.zeros(GRID_N * GRID_N, np.float32)
+        else:
+            u_flat, v_flat = uv[:, 0], uv[:, 1]
+        return (u_flat.reshape(GRID_N, GRID_N).tolist(),
+                v_flat.reshape(GRID_N, GRID_N).tolist())
+    return _rankine_wind_field(pred_lat, pred_lon, pred_wind, pred_pres)
+
 
 def _build_rf_features(s_lat, s_lon, s_pres, s_wind):
     dlat    = _glat_f - s_lat
@@ -363,16 +459,80 @@ def _run_physics_forecast(history: list, steps: int) -> dict:
 
 def _run_ml_forecast(history: list, steps: int) -> dict:
     """
-    ML-based forecast. The LSTM predicts the storm track (lat, lon, pressure,
-    wind) autoregressively. The wind field is produced by the RF wind-field
-    regressor when present, otherwise by the Rankine-vortex physics — so the
-    LSTM track is used regardless of whether rf_wind_model.pkl exists.
+    ML-based forecast. Dispatches on the model's declared mode (lstm_meta.json):
+
+      "residual_over_physics" (hybrid, default for models trained by
+          train_lstm.py): each step = persistence_step(window) + LSTM correction.
+          The physics baseline carries the trajectory; the LSTM only nudges it,
+          so the rollout cannot drift far worse than persistence.
+
+      "absolute" (legacy): the LSTM directly predicts the next absolute state.
+
+    The wind field is the RF regressor when present, else the Rankine vortex —
+    so the LSTM track is used regardless of whether rf_wind_model.pkl exists.
     """
     _load_scalers()
+    meta = _load_meta()
     lstm = _load_lstm()
     rf   = _load_rf() if _rf_wind_available() else None
-    wind_method = "rf" if rf is not None else "rankine"
 
+    if meta.get("mode") == "residual_over_physics":
+        return _rollout_hybrid(history, steps, lstm, rf, meta)
+    return _rollout_absolute(history, steps, lstm, rf)
+
+
+def _assemble(forecast_steps):
+    return {
+        "grid": {"lats": _glat_2d.tolist(), "lons": _glon_2d.tolist()},
+        "forecast_steps": forecast_steps,
+        "method": "ml",
+    }
+
+
+def _rollout_hybrid(history, steps, lstm, rf, meta):
+    """Hybrid rollout: next state = persistence baseline + LSTM residual."""
+    wind_method = "rf" if rf is not None else "rankine"
+    T = int(meta.get("T", lstm.input_shape[1]))
+    win = _phys_window(history, T)                 # (T, 4) physical
+
+    forecast_steps = []
+    for step in range(steps):
+        # LSTM correction (predicted in normalised-residual space)
+        x_norm = _lstm_scaler.transform(win).astype(np.float32)[np.newaxis]
+        resid_norm = lstm.predict(x_norm, verbose=0)
+        if resid_norm.ndim == 3:
+            resid_norm = resid_norm[:, -1, :]
+        if _lstm_resid_scaler is not None:
+            resid = _lstm_resid_scaler.inverse_transform(
+                resid_norm.reshape(1, 4))[0]
+        else:
+            resid = resid_norm[0]
+
+        phys_next = persistence_step(win)          # (4,) physical baseline
+        state = _clip_state(phys_next + resid)
+        pred_lat, pred_lon, pred_pres, pred_wind = (
+            float(state[0]), float(state[1]), float(state[2]), float(state[3]))
+
+        u_grid, v_grid = _wind_field(pred_lat, pred_lon, pred_pres, pred_wind, rf)
+
+        win = np.vstack([win[1:], state])          # slide window forward
+        forecast_steps.append({
+            "hour":        (step + 1) * STEP_HOURS,
+            "lat":         round(pred_lat,  4),
+            "lon":         round(pred_lon,  4),
+            "pressure":    round(pred_pres, 1),
+            "wind_speed":  round(pred_wind, 1),
+            "u":           u_grid,
+            "v":           v_grid,
+            "method":      "ml",
+            "wind_method": wind_method,
+        })
+    return _assemble(forecast_steps)
+
+
+def _rollout_absolute(history, steps, lstm, rf):
+    """Legacy rollout: the LSTM directly predicts the next absolute state."""
+    wind_method  = "rf" if rf is not None else "rankine"
     expected_len = lstm.input_shape[1]
     window       = _prepare_window(history, expected_len)   # (1, T, 4)
 
@@ -393,27 +553,10 @@ def _run_ml_forecast(history: list, steps: int) -> dict:
             pred_pres = _denorm(pred_norm[2], "pressure")
             pred_wind = _denorm(pred_norm[3], "wind_speed")
 
-        # ---- Wind field: RF regressor if available, else Rankine vortex ----
-        if rf is not None:
-            X_rf = _build_rf_features(pred_lat, pred_lon, pred_pres, pred_wind)
-            if _rf_scaler is not None:
-                X_rf = _rf_scaler.transform(X_rf).astype(np.float32)
-            uv = rf.predict(X_rf)
-            if uv.ndim == 1:
-                u_flat, v_flat = uv.ravel(), np.zeros_like(uv)
-            elif uv.shape[1] == 1:
-                u_flat, v_flat = uv[:, 0], np.zeros(GRID_N * GRID_N, np.float32)
-            else:
-                u_flat, v_flat = uv[:, 0], uv[:, 1]
-            u_grid = u_flat.reshape(GRID_N, GRID_N).tolist()
-            v_grid = v_flat.reshape(GRID_N, GRID_N).tolist()
-        else:
-            u_grid, v_grid = _rankine_wind_field(
-                pred_lat, pred_lon, pred_wind, pred_pres)
+        u_grid, v_grid = _wind_field(pred_lat, pred_lon, pred_pres, pred_wind, rf)
 
         window = np.concatenate(
             [window[:, 1:, :], pred_norm.reshape(1, 1, 4)], axis=1)
-
         forecast_steps.append({
             "hour":        (step + 1) * STEP_HOURS,
             "lat":         round(pred_lat,  4),
@@ -425,15 +568,7 @@ def _run_ml_forecast(history: list, steps: int) -> dict:
             "method":      "ml",
             "wind_method": wind_method,
         })
-
-    return {
-        "grid": {
-            "lats": _glat_2d.tolist(),
-            "lons": _glon_2d.tolist(),
-        },
-        "forecast_steps": forecast_steps,
-        "method": "ml",
-    }
+    return _assemble(forecast_steps)
 
 
 # ===========================================================================

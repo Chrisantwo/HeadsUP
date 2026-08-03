@@ -247,6 +247,42 @@ def lstm_forecast(model, seed_lats, seed_lons,
 
 
 # =============================================================
+#  PRODUCTION LSTM INFERENCE (via ai_models.run_forecast)
+# =============================================================
+# The runtime uses scripts/ai_models.py (residual LSTM + saved MinMaxScaler +
+# Rankine wind fallback). We evaluate through that exact path so the reported
+# skill scores match what the deployed app actually produces — rather than the
+# legacy z-score lstm_forecast() above, which does NOT match the trained model.
+
+def ai_models_available():
+    """True when the production LSTM path model is present."""
+    try:
+        import ai_models
+        return ai_models._lstm_available()
+    except Exception:
+        return False
+
+
+def ai_forecast(seed_lat, seed_lon, seed_wind, seed_pres, n_steps):
+    """
+    Run the production forecast (ai_models.run_forecast) from the seed window.
+    Returns (pred_lats, pred_lons) each of length n_steps.
+    Feature order for history dicts: lat, lon, pressure, wind_speed.
+    """
+    import ai_models
+    history = [
+        {"lat": float(la), "lon": float(lo),
+         "pressure": float(pr), "wind_speed": float(wi)}
+        for la, lo, pr, wi in zip(seed_lat, seed_lon, seed_pres, seed_wind)
+    ]
+    res = ai_models.run_forecast(history, steps=n_steps)
+    steps = res["forecast_steps"]
+    pred_lats = np.array([s["lat"] for s in steps], dtype=float)
+    pred_lons = np.array([s["lon"] for s in steps], dtype=float)
+    return pred_lats, pred_lons
+
+
+# =============================================================
 #  TRACK ERROR EVALUATION
 # =============================================================
 
@@ -274,11 +310,10 @@ def evaluate_track(storm, lstm_model, mode_label):
         return None
 
     # Run forecast
-    if lstm_model is not None and mode_label == "LSTM":
+    if mode_label == "LSTM":
         try:
-            pred_lats, pred_lons = lstm_forecast(
-                lstm_model, seed_lat, seed_lon,
-                seed_wind, seed_pres, max_steps)
+            pred_lats, pred_lons = ai_forecast(
+                seed_lat, seed_lon, seed_wind, seed_pres, max_steps)
         except Exception as e:
             print(f"    [LSTM error] {e} — falling back to physics")
             pred_lats, pred_lons = physics_forecast(
@@ -473,10 +508,10 @@ def plot_storm_prediction(storm, lstm_model, mode_label, out_dir):
     if max_steps < 2:
         return
 
-    if lstm_model is not None and mode_label == "LSTM":
+    if mode_label == "LSTM":
         try:
-            pred_lats, pred_lons = lstm_forecast(
-                lstm_model, seed_lat, seed_lon, seed_wind, seed_pres, max_steps)
+            pred_lats, pred_lons = ai_forecast(
+                seed_lat, seed_lon, seed_wind, seed_pres, max_steps)
         except Exception:
             pred_lats, pred_lons = physics_forecast(seed_lat, seed_lon, max_steps)
     else:
@@ -611,10 +646,16 @@ def main():
               "Check that data/wp_2023_data.json etc. exist.")
         sys.exit(1)
 
-    # 2. Load LSTM model if available
-    print("\n[2] Checking for trained LSTM model...")
-    lstm_model = load_lstm_model()
-    mode_label = "LSTM" if lstm_model else "Physics"
+    # 2. Detect the production LSTM path model (via ai_models). Track inference
+    #    runs through ai_models.run_forecast so results match the deployed app.
+    print("\n[2] Checking for trained LSTM model (production ai_models)...")
+    lstm_model = None
+    if ai_models_available():
+        mode_label = "LSTM"
+        print("  [LSTM] Production model found — evaluating via ai_models.run_forecast")
+    else:
+        mode_label = "Physics"
+        print("  [LSTM] No production model found — using physics engine")
 
     # 3. Track evaluation
     print(f"\n[3] Evaluating track errors ({mode_label} mode)...")
@@ -709,6 +750,30 @@ def main():
         )
     summary_lines.append("")
 
+    # Side-by-side LSTM vs physics baseline (only meaningful in LSTM mode)
+    if mode_label == "LSTM" and results_phys:
+        summary_lines.append("LSTM vs PHYSICS BASELINE  —  RMSE (km), lower is better")
+        summary_lines.append("-" * 60)
+        summary_lines.append(
+            f"{'Lead':>6}  {'LSTM':>10}  {'Physics':>10}  {'Skill':>8}  {'Winner':>8}")
+        summary_lines.append("-" * 60)
+        for h in lead_h:
+            lstm_errs = [r[h] for r in results_ml   if h in r]
+            phys_errs = [r[h] for r in results_phys if h in r]
+            if not lstm_errs or not phys_errs:
+                continue
+            rmse_l = math.sqrt(sum(e**2 for e in lstm_errs) / len(lstm_errs))
+            rmse_p = math.sqrt(sum(e**2 for e in phys_errs) / len(phys_errs))
+            ss = skill_scores.get(h, float("nan"))
+            winner = "LSTM" if rmse_l < rmse_p else "Physics"
+            summary_lines.append(
+                f"{str(h)+'h':>6}  {rmse_l:>10.2f}  {rmse_p:>10.2f}  "
+                f"{ss:>8.4f}  {winner:>8}")
+        summary_lines.append("")
+        summary_lines.append(
+            "  Skill = 1 - RMSE_LSTM / RMSE_Physics   (> 0 means LSTM beats persistence)")
+        summary_lines.append("")
+
     if clf_report:
         summary_lines.append("INTENSITY CLASSIFICATION (Random Forest)")
         summary_lines.append("-" * 60)
@@ -736,13 +801,25 @@ def main():
     print(f"\n  Saved summary: {txt_path}")
 
     # Write JSON
+    physics_metrics = {}
+    for h in lead_h:
+        perrs = [r[h] for r in results_phys if h in r]
+        if perrs:
+            arr = np.array(perrs)
+            physics_metrics[h] = {
+                "n":    len(arr),
+                "rmse": round(float(np.sqrt(np.mean(arr**2))), 2),
+                "mae":  round(float(np.mean(arr)), 2),
+            }
+
     output_json = {
-        "mode":          mode_label,
-        "train_years":   TRAIN_YEARS,
-        "test_years":    TEST_YEARS,
-        "n_test_storms": len(results_ml),
-        "track_metrics": track_metrics,
-        "skill_scores":  skill_scores,
+        "mode":            mode_label,
+        "train_years":     TRAIN_YEARS,
+        "test_years":      TEST_YEARS,
+        "n_test_storms":   len(results_ml),
+        "track_metrics":   track_metrics,
+        "physics_metrics": physics_metrics,
+        "skill_scores":    skill_scores,
     }
     if SK_AVAILABLE and y_true is not None:
         output_json["classification"] = {
