@@ -87,9 +87,24 @@ _glon_f          = _glon_2d.ravel()   # (400,)
 # ---------------------------------------------------------------------------
 # ML loaders
 # ---------------------------------------------------------------------------
+def _lstm_available() -> bool:
+    """LSTM path model present -> ML track prediction is possible."""
+    return any(os.path.exists(p) for p in (LSTM_PATH, LSTM_PATH_K))
+
+
+def _rf_wind_available() -> bool:
+    """RF per-grid wind-field regressor present -> ML wind field is possible."""
+    return os.path.exists(RF_PATH)
+
+
 def _ml_available() -> bool:
-    return any(os.path.exists(p) for p in (LSTM_PATH, LSTM_PATH_K)) and \
-           os.path.exists(RF_PATH)
+    """
+    ML forecasting activates as soon as the LSTM path model exists. The RF
+    wind-field model is optional: when it is absent the wind field is filled
+    by the Rankine-vortex physics (_rankine_wind_field), so the LSTM track is
+    still used. (These two models are decoupled on purpose.)
+    """
+    return _lstm_available()
 
 
 def _load_lstm():
@@ -347,10 +362,16 @@ def _run_physics_forecast(history: list, steps: int) -> dict:
 # ===========================================================================
 
 def _run_ml_forecast(history: list, steps: int) -> dict:
-    """ML-based forecast via LSTM path + RF wind field."""
+    """
+    ML-based forecast. The LSTM predicts the storm track (lat, lon, pressure,
+    wind) autoregressively. The wind field is produced by the RF wind-field
+    regressor when present, otherwise by the Rankine-vortex physics — so the
+    LSTM track is used regardless of whether rf_wind_model.pkl exists.
+    """
     _load_scalers()
     lstm = _load_lstm()
-    rf   = _load_rf()
+    rf   = _load_rf() if _rf_wind_available() else None
+    wind_method = "rf" if rf is not None else "rankine"
 
     expected_len = lstm.input_shape[1]
     window       = _prepare_window(history, expected_len)   # (1, T, 4)
@@ -372,30 +393,37 @@ def _run_ml_forecast(history: list, steps: int) -> dict:
             pred_pres = _denorm(pred_norm[2], "pressure")
             pred_wind = _denorm(pred_norm[3], "wind_speed")
 
-        X_rf = _build_rf_features(pred_lat, pred_lon, pred_pres, pred_wind)
-        if _rf_scaler is not None:
-            X_rf = _rf_scaler.transform(X_rf).astype(np.float32)
-
-        uv = rf.predict(X_rf)
-        if uv.ndim == 1:
-            u_flat, v_flat = uv.ravel(), np.zeros_like(uv)
-        elif uv.shape[1] == 1:
-            u_flat, v_flat = uv[:, 0], np.zeros(GRID_N * GRID_N, np.float32)
+        # ---- Wind field: RF regressor if available, else Rankine vortex ----
+        if rf is not None:
+            X_rf = _build_rf_features(pred_lat, pred_lon, pred_pres, pred_wind)
+            if _rf_scaler is not None:
+                X_rf = _rf_scaler.transform(X_rf).astype(np.float32)
+            uv = rf.predict(X_rf)
+            if uv.ndim == 1:
+                u_flat, v_flat = uv.ravel(), np.zeros_like(uv)
+            elif uv.shape[1] == 1:
+                u_flat, v_flat = uv[:, 0], np.zeros(GRID_N * GRID_N, np.float32)
+            else:
+                u_flat, v_flat = uv[:, 0], uv[:, 1]
+            u_grid = u_flat.reshape(GRID_N, GRID_N).tolist()
+            v_grid = v_flat.reshape(GRID_N, GRID_N).tolist()
         else:
-            u_flat, v_flat = uv[:, 0], uv[:, 1]
+            u_grid, v_grid = _rankine_wind_field(
+                pred_lat, pred_lon, pred_wind, pred_pres)
 
         window = np.concatenate(
             [window[:, 1:, :], pred_norm.reshape(1, 1, 4)], axis=1)
 
         forecast_steps.append({
-            "hour":       (step + 1) * STEP_HOURS,
-            "lat":        round(pred_lat,  4),
-            "lon":        round(pred_lon,  4),
-            "pressure":   round(pred_pres, 1),
-            "wind_speed": round(pred_wind, 1),
-            "u":          u_flat.reshape(GRID_N, GRID_N).tolist(),
-            "v":          v_flat.reshape(GRID_N, GRID_N).tolist(),
-            "method":     "ml",
+            "hour":        (step + 1) * STEP_HOURS,
+            "lat":         round(pred_lat,  4),
+            "lon":         round(pred_lon,  4),
+            "pressure":    round(pred_pres, 1),
+            "wind_speed":  round(pred_wind, 1),
+            "u":           u_grid,
+            "v":           v_grid,
+            "method":      "ml",
+            "wind_method": wind_method,
         })
 
     return {
