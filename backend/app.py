@@ -1196,11 +1196,11 @@ def forecast_smart():
             track_history = best['path']
             source        = best['source']
 
-    # Step 2 — validate we have something to forecast with
-    if not track_history or len(track_history) < 2:
+    # Step 2 — validate we have at least one fix to forecast from
+    if not track_history:
         return jsonify({
             'error': (
-                'track_history must contain >= 2 points. '
+                'track_history must contain >= 1 point. '
                 'Provide track_history in the body or set use_live=true.'
             )
         }), 400
@@ -1214,6 +1214,24 @@ def forecast_smart():
             'pressure':   float(p.get('pressure', 990)),
             'wind_speed': float(p.get('wind_speed', p.get('windSpeed', 35))),
         })
+
+    # Step 3b — a just-formed storm can have a single fix (no motion history),
+    # which the kinematic/LSTM engines can't derive a heading from. Seed a prior
+    # point from nominal WNW climatological drift (typical Western Pacific TC
+    # motion) so a forecast track + grid is still produced instead of a 400.
+    assumed_initial_motion = False
+    if len(normalized) == 1:
+        cur = normalized[0]
+        normalized = [
+            {   # prior point, placed SE of the fix -> implied motion is WNW
+                'lat':        cur['lat'] - 0.25,
+                'lon':        cur['lon'] + 0.30,
+                'pressure':   cur['pressure'],
+                'wind_speed': cur['wind_speed'],
+            },
+            cur,
+        ]
+        assumed_initial_motion = True
 
     # Step 4 — run forecast (physics if no ML models; ML if models/ has the files)
     try:
@@ -1232,6 +1250,7 @@ def forecast_smart():
         'forecast_steps':   result['forecast_steps'],
         'grid':             result['grid'],
         'track_history':    normalized,
+        'assumed_initial_motion': assumed_initial_motion,
         'generated_at_utc': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
         'step_hours':       3,
         'total_hours':      168,
