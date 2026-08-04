@@ -30,6 +30,7 @@ weather_grid_cache = {}
 full_grid_cache = {}   # stores complete 7-day hourly grid, refreshed every 30 min
 live_storms_cache = {'storms': [], 'source': 'loading', 'fetched_at': None}
 marine_full_grid_cache = {}
+daily_forecast_cache = {}   # per-location 7-day daily summary, refreshed every 30 min
 _live_storms_lock = threading.Lock()
 
 def get_resource_path(relative_path):
@@ -1378,6 +1379,86 @@ def get_full_weather_grid():
     }
     full_grid_cache.clear()
     full_grid_cache[cache_key] = payload
+    return jsonify(payload)
+
+
+# Default location for the 7-day daily panel. The thesis is Naga-focused, so the
+# day cards summarise ONE representative location (proper daily high/low/rain),
+# not a basin-wide spatial extreme.
+NAGA_CITY = {'name': 'Naga City', 'lat': 13.62, 'lon': 123.18}
+
+
+@app.route('/api/weather/daily', methods=['GET'])
+def get_daily_forecast():
+    """
+    7-day DAILY forecast for a single location (default: Naga City), using
+    Open-Meteo's daily aggregates — real per-day high/low, precipitation total,
+    max wind, and WMO weather code. Returns values already aggregated by
+    Open-Meteo for the location's local calendar day (Asia/Manila), so the
+    numbers match what a normal weather app shows.
+
+    Query params (all optional): lat, lon, name.
+    Cached for 30 minutes (one bucket = 1800 s).
+    """
+    try:
+        lat = request.args.get('lat', default=NAGA_CITY['lat'], type=float)
+        lon = request.args.get('lon', default=NAGA_CITY['lon'], type=float)
+    except (TypeError, ValueError):
+        lat, lon = NAGA_CITY['lat'], NAGA_CITY['lon']
+    name = request.args.get('name', default=NAGA_CITY['name'], type=str)
+
+    now_bucket = int(datetime.utcnow().timestamp() // 1800)
+    cache_key  = f"daily_{lat:.3f}_{lon:.3f}_{now_bucket}"
+    cached     = daily_forecast_cache.get(cache_key)
+    if cached is not None:
+        return jsonify(cached)
+
+    try:
+        resp = requests.get(
+            'https://api.open-meteo.com/v1/forecast',
+            params={
+                'latitude':  lat,
+                'longitude': lon,
+                'daily': ','.join([
+                    'weather_code',
+                    'temperature_2m_max', 'temperature_2m_min',
+                    'precipitation_sum', 'wind_speed_10m_max',
+                ]),
+                'forecast_days': 7,
+                'timezone': 'Asia/Manila',
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        d = resp.json().get('daily', {})
+    except Exception as e:
+        return jsonify({'status': 'error', 'error': f'Daily fetch failed: {e}'}), 502
+
+    times = d.get('time', [])
+    days = []
+    for i, day in enumerate(times):
+        def _at(key):
+            arr = d.get(key, [])
+            return arr[i] if i < len(arr) and arr[i] is not None else None
+        days.append({
+            'date':        day,
+            'weather_code': _at('weather_code'),
+            'temp_max':    _at('temperature_2m_max'),
+            'temp_min':    _at('temperature_2m_min'),
+            'precip':      _at('precipitation_sum'),
+            'wind_max':    _at('wind_speed_10m_max'),
+        })
+
+    payload = {
+        'status':           'success',
+        'provider':         'open-meteo',
+        'location':         {'name': name, 'lat': lat, 'lon': lon},
+        'timezone':         'Asia/Manila',
+        'generated_at_utc': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'days':             days,
+    }
+    daily_forecast_cache.clear()
+    daily_forecast_cache[cache_key] = payload
     return jsonify(payload)
 
 

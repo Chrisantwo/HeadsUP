@@ -5,9 +5,12 @@ import { useDashboard } from '@/hooks/useDashboardState'
 import { useTimeline } from '@/hooks/useTimeline'
 import { STEP_HRS, API_BASE } from '@/lib/constants'
 
-// ── Real 7-day forecast from Flask /api/weather/fullgrid ───────────────────
-// We derive daily summaries from the same hourly dataset the map uses,
-// so the cards and the overlay always show exactly the same data.
+// ── Real 7-day DAILY forecast from Flask /api/weather/daily ────────────────
+// One representative location (Naga City) with proper per-day high/low, rain
+// total, and WMO weather code — aggregated by Open-Meteo for the local
+// calendar day. (The earlier version derived these from the basin-wide hourly
+// grid using spatial max/min, which showed regional extremes, not a real
+// location's daily high/low.)
 interface DayForecast {
   date: string
   tempMax: number | null
@@ -32,61 +35,30 @@ function useDayForecasts(): DayForecast[] {
     const ctrl = new AbortController()
     ;(async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/weather/fullgrid?region=par`, {
+        const res = await fetch(`${API_BASE}/api/weather/daily`, {
           signal: ctrl.signal, cache: 'no-store',
         })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const json = await res.json()
-        if (json.status !== 'success') throw new Error('bad status')
-
-        // Average across all grid points to get a PAR-region summary
-        const pts: Array<{
-          temp: (number|null)[]; heat: (number|null)[]; precip: (number|null)[]
-          wind_speed: (number|null)[]; cloud: (number|null)[]
-        }> = json.points
-
-        const N_HRS = 168
-        const base  = new Date()
-        base.setUTCMinutes(0, 0, 0)
-
-        const result: DayForecast[] = []
-        for (let day = 0; day < 7; day++) {
-          const startH = day * 24
-          const endH   = Math.min(startH + 24, N_HRS)
-          const d = new Date(base.getTime() + day * 86_400_000)
-          const dateStr = d.toISOString().slice(0, 10)
-
-          let sumTemp = 0, minTemp = Infinity, maxTemp = -Infinity
-          let sumPrecip = 0, maxWind = 0, count = 0
-
-          for (let h = startH; h < endH; h++) {
-            for (const p of pts) {
-              const t  = p.temp[h]
-              const pr = p.precip[h]
-              const ws = p.wind_speed[h]
-              if (t  != null) { sumTemp += t; if (t < minTemp) minTemp = t; if (t > maxTemp) maxTemp = t; count++ }
-              if (pr != null && pr > sumPrecip / Math.max(count,1)) sumPrecip += pr / pts.length
-              if (ws != null && ws > maxWind) maxWind = ws
-            }
-          }
-
-          result.push({
-            date:        dateStr,
-            tempMax:     maxTemp === -Infinity ? null : Math.round(maxTemp * 10) / 10,
-            tempMin:     minTemp === Infinity  ? null : Math.round(minTemp * 10) / 10,
-            precip:      sumPrecip > 0 ? Math.round(sumPrecip * 10) / 10 : 0,
-            windMax:     maxWind > 0   ? Math.round(maxWind)            : null,
-            weatherCode: null,   // derive from precip/wind below
-          })
+        if (json.status !== 'success' || !Array.isArray(json.days)) {
+          throw new Error('bad status')
         }
 
-        // Assign a simple weather code from precip+wind for icons
-        result.forEach(r => {
-          if (r.precip !== null && r.precip > 15)     r.weatherCode = 65   // heavy rain
-          else if (r.precip !== null && r.precip > 3) r.weatherCode = 61   // light rain
-          else if (r.windMax !== null && r.windMax > 50) r.weatherCode = 3  // overcast/windy
-          else r.weatherCode = 0                                              // clear
-        })
+        const result: DayForecast[] = json.days.slice(0, 7).map((d: {
+          date: string
+          temp_max: number | null
+          temp_min: number | null
+          precip: number | null
+          wind_max: number | null
+          weather_code: number | null
+        }) => ({
+          date:        d.date,
+          tempMax:     d.temp_max != null ? Math.round(d.temp_max * 10) / 10 : null,
+          tempMin:     d.temp_min != null ? Math.round(d.temp_min * 10) / 10 : null,
+          precip:      d.precip   != null ? Math.round(d.precip   * 10) / 10 : null,
+          windMax:     d.wind_max != null ? Math.round(d.wind_max)           : null,
+          weatherCode: d.weather_code ?? null,
+        }))
 
         setDays(result)
       } catch (err) {
@@ -139,8 +111,10 @@ export function TimelineBar() {
   const [collapsed, setCollapsed] = useState(false)
 
   const now      = new Date()
-  const todayStr = now.toISOString().slice(0, 10)
-  const tmrwStr  = new Date(now.getTime() + 86_400_000).toISOString().slice(0, 10)
+  // Match the daily endpoint's Asia/Manila calendar days (en-CA -> YYYY-MM-DD)
+  const todayStr = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' })
+  const tmrwStr  = new Date(now.getTime() + 86_400_000)
+                     .toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' })
 
   // Anchor date for timeline (storm end or right now)
   const base = useMemo(() => {
