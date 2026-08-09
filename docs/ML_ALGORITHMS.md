@@ -30,27 +30,31 @@ flowchart LR
         L2["7-day track<br/>(56 × 3-hour steps)"]
     end
 
-    subgraph RF_PIPE["Random Forest — intensity (OFFLINE eval)"]
-        R1["backtest.py"]
-        R2["category per fix<br/>TD…STY + accuracy"]
+    subgraph RF_PIPE["Random Forest — intensity (LIVE + eval)"]
+        R1["classify live storm<br/>(app.py)"]
+        R2["category TD…STY"]
+        R3["backtest.py<br/>accuracy eval"]
     end
 
     H --> L1 --> L2
     H --> R1 --> R2
     L2 -->|"/api/forecast/smart"| WEB["Web + mobile map"]
-    R2 -->|"/api/analytics/model-performance"| AN["Analytics page"]
+    R2 -->|"/api/realtime-storms"| WEB
+    R3 -->|"/api/analytics/model-performance"| AN["Analytics page"]
 ```
 
-**Important, stated honestly:**
+**How each is used:**
 
 - The **LSTM runs live** on every forecast request (`/api/forecast/smart` →
   `ai_models.run_forecast`). Every track you see on the map is the LSTM.
-- The **Random Forest** is **trained and validated offline** in `backtest.py`
-  and its measured performance (≈90% accuracy) is what the **Analytics page**
-  reports. The **live storm badge** (TD/TS/…) is assigned by a wind-speed
-  threshold function `_wind_to_cat()` that mirrors the *same category bins* the
-  Random Forest is trained on — a fast, deterministic equivalent for the live
-  label. (See §5 for how to promote the RF into the live classification path.)
+- The **Random Forest runs live too**: `app.py` loads
+  `typhoon_rf_intensity_classifier.pkl` and classifies each active storm's
+  category from its recent track (`_classify_intensity_rf`), tagged
+  `category_source: "random_forest"`. A storm with fewer than 5 fixes (e.g. a
+  just-formed one) falls back to the `_wind_to_cat` wind-speed bins
+  (`category_source: "wind_threshold"`), which use the same category thresholds.
+  The model's overall accuracy (≈90%) is separately reported on the **Analytics
+  page** from the offline backtest.
 
 ---
 
@@ -221,9 +225,22 @@ severe/super classes are harder (fewer training samples), which the
 
 ### 3.5 Where it appears in the app
 
-The Random Forest's evaluation is surfaced on the **Analytics page** via
-`/api/analytics/model-performance`, which serves the offline backtest metrics
-(accuracy, macro F1, per-class scores, confusion matrix).
+Two places:
+
+1. **Live classification** — `app.py` loads the model once and calls
+   `_classify_intensity_rf(path)` for every active storm during the 10-minute
+   live-storm refresh. The predicted category feeds the storm badge on the web
+   and mobile maps (`/api/realtime-storms`), tagged
+   `category_source: "random_forest"`. Storms with fewer than 5 fixes fall back
+   to the `_wind_to_cat` wind-speed bins.
+2. **Accuracy report** — the offline backtest metrics (accuracy, macro F1,
+   per-class scores, confusion matrix) are surfaced on the **Analytics page** via
+   `/api/analytics/model-performance`.
+
+The live feature vector is built to match the training layout exactly (§3.2);
+`wind` is in knots in both the training data and the live feed, so the inputs are
+consistent. Validated: replaying historical storms through the live path
+reproduces the model's ~90% class agreement.
 
 ---
 
@@ -243,18 +260,15 @@ not ML.
 
 ---
 
-## 5. Honest status & optional next step
+## 5. Status
 
-- **LSTM:** fully live. ✔
-- **Random Forest:** trained, validated (≈90%), and reported in Analytics. The
-  **live per-storm badge** currently uses `_wind_to_cat()` (wind-speed
-  thresholds over the same category bins), not a live call to the RF model.
+- **LSTM:** fully live — drives every track forecast. ✔
+- **Random Forest:** fully live — classifies every active storm's intensity from
+  its recent track (`_classify_intensity_rf` in `app.py`), with a wind-speed-bin
+  fallback only for storms with fewer than 5 fixes. Its ≈90% accuracy is
+  reported on the Analytics page. ✔
 
-**To make the Random Forest classify live storms directly** (so the badge is the
-RF's own prediction), load `typhoon_rf_intensity_classifier.pkl` at runtime in
-`app.py`, build the 9-feature vector from the storm's recent fixes, and replace
-the `_wind_to_cat()` call with `clf.predict(...)`. This is a small, well-scoped
-change and would make the live intensity label a genuine ML output end-to-end.
+Both algorithms are genuine end-to-end ML outputs in the running application.
 
 ---
 

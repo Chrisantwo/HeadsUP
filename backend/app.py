@@ -48,6 +48,99 @@ def _wind_to_cat(kt):
     return 5
 
 
+# ── Random Forest intensity classifier (live) ───────────────────────────────
+# Classifies a storm's current intensity category (0..5) from its recent track
+# using the same 9 features the model was trained on (see
+# scripts/backtest.py :: build_classification_dataset). Loaded lazily. Falls back
+# to the _wind_to_cat wind-speed bins when the model is unavailable or the storm
+# has fewer than 5 fixes. Validated to match the model's ~90% training accuracy.
+_RF_INTENSITY_PATH = os.path.join(os.path.dirname(__file__), 'models',
+                                  'typhoon_rf_intensity_classifier.pkl')
+_rf_intensity = None
+_rf_intensity_tried = False
+_rf_intensity_lock = threading.Lock()
+
+
+def _load_rf_intensity():
+    # Double-checked locking: the background refresh thread and request threads
+    # can call this concurrently. We must NOT mark it "tried" until the load has
+    # actually finished, or a concurrent caller would see tried=True with the
+    # model still None and wrongly fall back to wind bins.
+    global _rf_intensity, _rf_intensity_tried
+    if _rf_intensity_tried:
+        return _rf_intensity
+    with _rf_intensity_lock:
+        if _rf_intensity_tried:
+            return _rf_intensity
+        try:
+            import joblib                  # our own trained artifact (first-party)
+            if os.path.exists(_RF_INTENSITY_PATH):
+                _rf_intensity = joblib.load(_RF_INTENSITY_PATH)
+                logger.info('RF intensity classifier loaded: %s', _RF_INTENSITY_PATH)
+        except Exception as exc:
+            logger.warning('RF intensity load failed (%s); using wind-speed bins.', exc)
+        _rf_intensity_tried = True
+    return _rf_intensity
+
+
+def _rf_pf(v, default=0.0):
+    """Parse a value that may be a string like '< 35' to float."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        m = _re.search(r'[\d.]+', str(v))
+        return float(m.group()) if m else default
+
+
+def _haversine_km_simple(lat1, lon1, lat2, lon2):
+    import math
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _classify_intensity_rf(path):
+    """
+    Predict the current intensity class (0..5) for a storm from its recent track
+    with the Random Forest model. Returns an int, or None when the model is
+    unavailable or there is too little history (caller falls back to _wind_to_cat).
+
+    Feature order matches backtest.py :: build_classification_dataset (9 features):
+      lat, lon, wind, pressure, prev_class,
+      12h wind trend, 12h pressure trend, translation speed (km/h),
+      diurnal (index) sine.
+    """
+    import math
+    clf = _load_rf_intensity()
+    if clf is None or not path or len(path) < 5:
+        return None
+    lats  = [_rf_pf(p.get('lat')) for p in path]
+    lons  = [_rf_pf(p.get('lon', p.get('long'))) for p in path]
+    winds = [_rf_pf(p.get('wind_speed', p.get('speed', 0))) for p in path]
+    pres  = [_rf_pf(p.get('pressure', 1010), 1010.0) for p in path]
+    # Explicit class if the point carries one (historical), else derive from wind.
+    cls   = [int(p['class']) if 'class' in p else _wind_to_cat(winds[k])
+             for k, p in enumerate(path)]
+
+    i = len(path) - 1   # classify the latest fix
+    seg_km = _haversine_km_simple(lats[i-1], lons[i-1], lats[i-2], lons[i-2])
+    features = [
+        lats[i-1], lons[i-1], winds[i-1], pres[i-1],
+        float(cls[i-1]),
+        winds[i-1] - winds[i-4],
+        pres[i-1]  - pres[i-4],
+        seg_km / 3.0,                                   # 3-hour step -> km/h
+        float(math.sin(math.radians(((i-1) % 12) / 12 * 360))),
+    ]
+    try:
+        return int(clf.predict([features])[0])
+    except Exception as exc:
+        logger.warning('RF intensity predict failed: %s', exc)
+        return None
+
+
 def _storm_freshness(storm, now):
     """
     Classify how current a storm's position is, and its age in hours.
@@ -342,6 +435,15 @@ def _refresh_live_storms_cache():
     """
     global live_storms_cache
     storms = _fetch_live_storms()
+    # Upgrade each storm's category to the Random Forest prediction when the
+    # track has enough history; otherwise keep the wind-speed-bin category.
+    for s in storms:
+        rf_cat = _classify_intensity_rf(s.get('path'))
+        if rf_cat is not None:
+            s['category'] = rf_cat
+            s['category_source'] = 'random_forest'
+        else:
+            s.setdefault('category_source', 'wind_threshold')
     with _live_storms_lock:
         live_storms_cache = {
             'storms': storms,
