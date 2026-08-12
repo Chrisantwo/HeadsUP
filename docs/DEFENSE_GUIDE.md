@@ -1,281 +1,228 @@
-# HeadsUp — Thesis Defense Guide
+# HeadsUp — Defense Guide (Explained Simply)
 
-A practical guide to explaining and defending HeadsUp. It gives you the pitch,
-simple explanations of the ML, the exact numbers to cite, a question-and-answer
-bank for the panel, an honest list of limitations, and a live-demo script.
+This guide explains HeadsUp in the **simplest possible way** so you can confidently
+explain and defend it. No jargon walls — plain words, everyday comparisons, and
+the exact numbers to say.
 
-**Golden rule of a defense: be honest and precise.** You do not need the system
-to be perfect — you need to *understand* it and *state clearly* what it does,
-how well, and where its limits are. Panelists reward students who know their own
-system's boundaries. This guide is written so every answer you give is true.
-
----
-
-## 1. The 30-second pitch
-
-> "HeadsUp is a real-time typhoon monitoring and 7-day forecasting system for the
-> Philippine Area of Responsibility, with hyperlocal hazard detail for Naga City.
-> It uses two machine-learning models: an **LSTM** that forecasts the storm's
-> **track** — where it will go — and a **Random Forest** that classifies the
-> storm's **intensity** — how strong it is. It pulls live storm data and live
-> weather, runs the forecast, and shows the track, wind signals, and flood/surge
-> risk on a web and mobile app."
-
-**Two ML models, two questions:**
-- **LSTM → "Where will it go?"** (the track)
-- **Random Forest → "How strong is it?"** (the category: TD, TS, TY, … STY)
-
-Memorize that sentence. Most follow-up questions branch from it.
+**The one rule for your defense:** be honest and clear. You don't need a perfect
+system. You need to *understand it* and *explain it plainly*. Everything in this
+guide is true to what the app actually does.
 
 ---
 
-## 2. Why this matters (significance)
+## 1. What is HeadsUp? (one breath)
 
-- The Philippines is hit by ~20 tropical cyclones a year; the Bicol Region
-  (Naga City) is highly exposed.
-- Official forecasts are national/regional. HeadsUp adds a **hyperlocal**
-  layer — barangay-level flood and storm-surge risk for Naga — on top of a
-  real 7-day track forecast, in one accessible web + mobile interface.
-- The goal is **decision support for preparedness** (evacuation, warnings), not
-  to replace PAGASA — a point worth stating explicitly (see Q "How is this
-  different from PAGASA?").
+> "HeadsUp is a typhoon app for the Philippines. It watches live storms, predicts
+> where each storm will go for the next 7 days, says how strong it is, and shows
+> the flood and storm-surge risk for Naga City — all on a website and a phone app."
 
----
+Two smart parts do the predicting:
+- **LSTM → predicts WHERE the storm goes** (the path/track).
+- **Random Forest → predicts HOW STRONG the storm is** (the category).
 
-## 3. Explaining the LSTM (in plain terms)
-
-**What an LSTM is (one sentence):** a type of neural network designed for
-*sequences* — it looks at a series of past steps and predicts the next one,
-which fits a storm track (a sequence of positions in time).
-
-**How we use it:** we feed the last 24 hours of the storm (8 three-hour steps),
-each described by 4 numbers — latitude, longitude, pressure, wind — and it
-predicts the next step. We repeat that 56 times to build a 7-day track.
-
-**The one clever design choice — say this, it impresses panels:**
-> "A plain LSTM that predicts the next absolute position actually performed
-> *worse* than a simple 'keep going the same way' baseline, because its own
-> small errors compound over a 7-day rollout. So I redesigned it as a
-> **hybrid**: the LSTM predicts only a **correction** to a physics-based
-> persistence forecast. The physics carries the trajectory; the LSTM nudges it.
-> That's what made it beat the baseline at the short lead times that matter for
-> warnings."
-
-`next_position = physics_persistence + LSTM_correction`
-
-**Why that's defensible:** it's an honest, standard technique (residual/hybrid
-modeling), and you can show the before/after numbers proving it helped.
+Remember this: **LSTM = where. Random Forest = how strong.** Almost every
+question comes back to these two.
 
 ---
 
-## 4. Explaining the Random Forest (in plain terms)
+## 2. How the app works (step by step, simply)
 
-**What a Random Forest is (one sentence):** an ensemble of many decision trees
-that vote on a category; it's robust and works well on tabular features.
+Think of it as an assembly line:
 
-**How we use it:** from the storm's recent track we compute 9 features
-(position, wind, pressure, how fast the wind/pressure are changing, translation
-speed, etc.) and the forest classifies the storm into one of 6 intensity
-categories: TD, TS, TY, SevTY-3, SevTY-4, STY.
+1. **Get the live storm.** The app pulls real storm positions from weather
+   agencies (PAGASA, JTWC, JMA) every 10 minutes.
+2. **Predict the path (LSTM).** It feeds the storm's recent movement into the
+   LSTM, which draws the next 7 days of the storm's path — one point every 3
+   hours.
+3. **Predict the strength (Random Forest).** It looks at the storm's recent
+   numbers and decides its category (Tropical Depression → Super Typhoon).
+4. **Add the weather.** It pulls live weather (rain, wind, temperature) from a
+   free weather service (Open-Meteo) and shows it as map layers.
+5. **Compute local risk.** For Naga City, it calculates flood and storm-surge
+   risk down to the barangay level.
+6. **Show it.** All of this appears on the web dashboard and the mobile app —
+   the storm marker, the 7-day track line, the category badge, and the risk.
 
-**Where it runs:** live — every time the app refreshes active storms (every 10
-minutes), the Random Forest classifies each one, and that category is the badge
-you see on the map. (Storms with too little history — fewer than 5 fixes — fall
-back to a wind-speed rule using the same category thresholds.)
-
----
-
-## 5. The numbers to memorize
-
-**LSTM track skill** (held-out test storms 2023–2025, 67 storms). Skill > 0
-means it beats the persistence baseline:
-
-| Lead time | LSTM error (RMSE) | Baseline error | Result |
-|-----------|------------------:|---------------:|--------|
-| 6 hours | 47 km | 60 km | **22% better** |
-| 12 hours | 107 km | 129 km | **17% better** |
-| 24 hours | 244 km | 268 km | **9% better** |
-| 48 h+ | — | — | roughly tied / physics slightly better |
-
-> One-liner: *"The LSTM improves the 0–24-hour track forecast by 9–22% over the
-> baseline — the window that matters most for evacuation decisions."*
-
-**Random Forest intensity accuracy** (held-out test set, ~3,500 samples):
-- **~90% overall accuracy**, **~0.80 macro F1**.
-- Very strong on common classes (TD/TS/TY ≈ 0.85–0.96 F1); weaker on the rare
-  Super Typhoon class (low recall — few training examples).
-
-**Data:** trained on Western Pacific tracks **2013–2022**, tested on **2023–2026**
-(a clean chronological split — see the data-leakage question).
+That's the whole pipeline: **live data → LSTM path → Random Forest strength →
+weather + local risk → shown on screen.**
 
 ---
 
-## 6. Panel Q&A bank (with honest answers)
+## 3. How the LSTM works (simply)
 
-### On the models
+**What it does:** predicts where the storm will be next.
 
-**Q: Why an LSTM for the track?**
-> Storm tracks are time sequences, and LSTMs are built for sequences — they
-> carry memory of the recent motion. That's a natural fit for predicting the
-> next position from the last several.
+**Everyday comparison:** Imagine watching a car drive down a road. From how it's
+been moving the last few seconds, you can guess where it'll be a moment later.
+The LSTM does that for storms — it looks at the last 24 hours of the storm's
+movement and guesses the next position, then repeats to build a 7-day path.
 
-**Q: Why did your LSTM only beat physics at short lead times?**
-> Because the forecast is autoregressive — it feeds its own predictions back in —
-> so errors compound over 7 days. At long range, no simple model beats the
-> strong momentum of a storm, so physics persistence is competitive. My
-> contribution is the short-to-medium range (0–24 h), which is exactly the
-> window used for warnings. I report this honestly rather than claiming it wins
-> everywhere.
+**What it looks at:** the last 8 recent points of the storm (one every 3 hours =
+24 hours), each with 4 numbers: latitude, longitude, air pressure, and wind
+speed.
 
-**Q: Isn't the Random Forest just doing what a wind-speed threshold does?**
-> The category *boundaries* align with wind thresholds, but the Random Forest
-> uses 9 features — including how fast the wind and pressure are *changing* and
-> the storm's motion — so it captures intensification/weakening trends, not just
-> the current wind. It reaches ~90% accuracy against the labeled categories. For
-> brand-new storms with too little history, I deliberately fall back to the
-> simple threshold, and I tag which method was used.
+**The clever trick (say this — it sounds smart and it's true):**
+> "At first my LSTM tried to guess the storm's exact next position, but its small
+> mistakes piled up over 7 days and it did worse than a simple 'keep going the
+> same way' guess. So I changed it: the LSTM now starts with that simple guess and
+> only makes a **small correction** to it. The simple guess keeps the storm on
+> track; the LSTM just fine-tunes it. That's what made it accurate."
 
-**Q: Why residual-over-physics instead of a pure LSTM?**
-> I tried the pure LSTM first — it lost to a trivial persistence baseline at
-> every lead time because errors compounded (−0.38 skill at 6 h). Letting the
-> LSTM correct a physics baseline turned that into +0.22 at 6 h. It's an honest,
-> reproducible improvement, and the backtest shows the before/after.
+In one line: **LSTM's answer = simple 'keep going' guess + a small smart
+correction.**
 
-**Q: Why is the wind-field (the arrows) physics and not ML?**
-> The track and intensity are the ML contributions. The wind *field* around the
-> storm is rendered with a standard Rankine-vortex model — a well-established
-> physical model. I chose not to claim ML there because I didn't train a model
-> for it; being precise about that is important.
-
-### On data & evaluation
-
-**Q: What's your train/test split? How do you avoid data leakage?**
-> A chronological split: train on 2013–2022, test on 2023–2026. The model never
-> sees the test years during training, and because it's split by time (not
-> random), there's no leakage of future information into the past.
-
-**Q: How did you measure track accuracy?**
-> Great-circle (haversine) distance in km between the predicted and actual
-> position at each lead time, aggregated as RMSE/MAE over 67 held-out storms.
-> Critically, the backtest calls the *same* forecast function the live app uses,
-> so the reported numbers reflect the deployed system, not an idealized one.
-
-**Q: The Super Typhoon recall is low (0.45). Why, and is that a problem?**
-> It's the rarest class — only ~142 test samples — so the model sees few
-> examples. I used class balancing to help, and precision on that class is
-> actually high (0.94). I'm transparent about this limitation; for a safety
-> system, I'd rather report it than hide it.
-
-**Q: Where does your data come from?**
-> Historical Western Pacific best-track records (2013–2026) for training; live
-> storm fixes from PAGASA/JTWC/JMA feeds; and live weather from Open-Meteo. The
-> app degrades gracefully to local fallbacks if a live source is down.
-
-### On scope & positioning
-
-**Q: How is this different from PAGASA / official forecasts?**
-> It's decision *support*, not a replacement. My additions are: (1) a 7-day ML
-> track forecast, (2) live ML intensity classification, and (3) a hyperlocal
-> barangay-level flood/surge layer for Naga that national bulletins don't
-> provide — all in one web + mobile app.
-
-**Q: Is this actually usable / deployed?**
-> Yes — it runs as a web dashboard and an Expo mobile app against a Flask
-> backend, with live data. I can demo it now.
-
-**Q: What happens when a storm just formed and has almost no data?**
-> With a single fix there's no motion to learn from, so I seed a nominal
-> climatological heading (typical WNW drift) and flag it as an assumption. Once a
-> second real fix arrives, it uses the storm's actual motion. Intensity for such
-> storms falls back to the wind-speed rule.
-
-### Curveballs
-
-**Q: What would you improve with more time?**
-> Three things: (1) train a proper ML wind-field model to replace the Rankine
-> physics; (2) more data / augmentation for the rare Super Typhoon class; (3)
-> extend the LSTM's long-range skill, possibly with a direct multi-horizon model
-> instead of autoregressive rollout.
-
-**Q: Why these algorithms and not deep learning for everything / a transformer?**
-> The dataset size (thousands of track segments) suits an LSTM for sequences and
-> a Random Forest for tabular classification — both are strong, well-understood,
-> and fast enough to run live. A transformer would need more data to justify.
-> Matching model complexity to data size is a deliberate choice.
+**Why an LSTM?** It's a type of AI built for *sequences* (things in order over
+time) — and a storm track is exactly that: a sequence of positions.
 
 ---
 
-## 7. Honest limitations (state these before they ask)
+## 4. How the Random Forest works (simply)
 
-Presenting limitations *first* signals maturity. Frame each with a mitigation:
+**What it does:** decides how strong the storm is (its category).
 
-| Limitation | Honest framing + mitigation |
-|-----------|------------------------------|
-| LSTM only beats baseline at 0–24 h | That's the warning-critical window; long-range TC forecasting is hard for any simple model. |
-| Super Typhoon recall is low | Rarest class, few samples; used class balancing; precision is still high; disclosed openly. |
-| Wind-field is physics, not ML | Track + intensity are the ML contributions; wind field uses a standard vortex model — stated plainly. |
-| New storms use an assumed initial heading | Flagged as an assumption; corrected once real motion is available. |
-| Depends on external live feeds | Graceful fallbacks to local data keep the app working offline. |
+**Everyday comparison:** Imagine asking 200 weather experts to each look at the
+storm and vote on its strength. Some look at wind, some at pressure, some at how
+fast it's changing. Then you go with the majority vote. A Random Forest is
+exactly that — 200 small "decision trees" that each vote, and the majority wins.
+"Forest" = many trees.
 
----
+**What it looks at (9 clues):** the storm's position, wind, pressure, how fast
+the wind is changing, how fast the pressure is changing, how fast the storm is
+moving, and the time of day.
 
-## 8. Live demo script (5 minutes)
+**The categories it picks from:**
+TD (Tropical Depression) → TS (Tropical Storm) → TY (Typhoon) → SevTY-3 →
+SevTY-4 → STY (Super Typhoon).
 
-1. **Open the dashboard.** "This is live data — active Western Pacific storms."
-2. **Point to a storm badge.** "This category comes from the Random Forest
-   classifier." (Mention `category_source: random_forest` if asked how you know.)
-3. **Show the forecast track.** "This dashed 7-day track is the LSTM's output,
-   stepping every 3 hours out to 168 hours."
-4. **Scrub the timeline.** Show the weather layers and the **7-day daily cards**
-   (real Naga City forecast).
-5. **Open My Area / hazard layer.** Show barangay-level flood/surge risk.
-6. **(Optional) Analytics page.** Show the backtest metrics — "this is the
-   measured accuracy of the models on held-out storms."
-
-**Backup if live data is empty:** have a screen recording or screenshots ready;
-storms aren't always active. Say so honestly if it happens.
+**Where it runs:** live. Every 10 minutes when the app refreshes storms, the
+Random Forest re-checks each storm's category. (If a storm just formed and has
+almost no history, the app uses a simple wind-speed rule instead, until there's
+enough data for the forest.)
 
 ---
 
-## 9. How to prove your claims (if challenged)
+## 5. How did the app get its prediction results? (very important)
 
-- **"Show me the accuracy."** → `backend/results/backtest_summary.txt` and the
-  Analytics page.
-- **"Reproduce it."** → `python backend/scripts/backtest.py` regenerates the
-  numbers; `python backend/scripts/train_lstm.py` retrains the LSTM.
-- **"Is the LSTM really running?"** → the forecast response includes
-  `method: "ml"`; the code path is `ai_models.run_forecast`.
-- **"Is the RF really running live?"** → each storm carries
-  `category_source: "random_forest"`.
+Panelists love this question: *"How do you know your predictions are any good?"*
+Here's the simple, honest answer.
+
+**The method — learn from the past, test on the future:**
+
+1. **Teach the models with OLD storms.** We used real Western Pacific storms from
+   **2013 to 2022** to train both models. This is where they "learned" the
+   patterns.
+2. **Test with NEWER storms they had never seen.** We then checked them on storms
+   from **2023 to 2026** — storms that were *not* used in training. This is a fair
+   test, like a student taking an exam on questions they didn't study the answers
+   to beforehand.
+3. **Measure how close the guesses were.**
+   - For the **LSTM (path)**, we measured the distance (in kilometers) between the
+     predicted position and where the storm *actually* went.
+   - For the **Random Forest (strength)**, we counted how often its category
+     matched the real category.
+
+**Why split by time (2013–2022 train, 2023–2026 test)?** So the model can't
+"cheat" by having seen the test storms. It only ever learned from the past and
+was tested on the future — no leakage.
+
+**One more honesty point:** the test uses the *same* prediction code the live app
+uses. So the reported accuracy is the real app's accuracy, not a lab-only number.
 
 ---
 
-## 10. Phrases to use (and to avoid)
+## 6. The results (numbers to say, explained simply)
 
-**Use — confident and precise:**
-- "The LSTM improves the 0–24-hour track by 9–22% over the baseline."
-- "I evaluated on held-out storms the model never saw during training."
-- "The wind field is a physics model; the ML contributions are track and intensity."
-- "Here's a limitation, and here's how I handled it."
+### LSTM (path) — how close were the guesses?
 
-**Avoid — overclaiming:**
-- "It's 90% accurate" *without* saying at what and on what data. (Be specific:
-  the *intensity classifier* is ~90% on the held-out test set.)
-- "It predicts typhoons perfectly / better than PAGASA."
-- "Everything uses AI." (The wind field and single-fix heading do not.)
+We compare the LSTM to a "dumb" baseline that just assumes the storm keeps moving
+the same way. **Positive skill = the LSTM is better.**
+
+| How far ahead | LSTM is off by | Baseline is off by | LSTM is… |
+|---------------|---------------:|-------------------:|----------|
+| 6 hours | ~47 km | ~60 km | **22% better** |
+| 12 hours | ~107 km | ~129 km | **17% better** |
+| 24 hours | ~244 km | ~268 km | **9% better** |
+| 2+ days | (grows) | (grows) | about tied |
+
+**Say this:** *"My LSTM is 9–22% more accurate than the baseline for the first
+24 hours — the window that matters most for warnings. Beyond that, all simple
+models struggle, and I report that honestly."*
+
+### Random Forest (strength) — how often right?
+
+- **About 90% accurate** at picking the right category.
+- Excellent on common storms (Depression, Storm, Typhoon).
+- Weaker on the rarest "Super Typhoon" class — because there are very few of them
+  to learn from (be honest about this).
 
 ---
 
-## 11. One-page cheat sheet
+## 7. Quick answers to likely questions
 
-- **What:** real-time typhoon monitoring + 7-day forecast + hyperlocal Naga hazard.
-- **LSTM:** track (where). Hybrid residual-over-physics. Beats baseline 9–22% at 0–24 h.
-- **Random Forest:** intensity (how strong). ~90% accuracy, ~0.80 macro F1. Runs live.
-- **Data:** WP tracks 2013–2022 train / 2023–2026 test (chronological, no leakage).
-- **Live:** PAGASA/JTWC/JMA storms + Open-Meteo weather; graceful fallbacks.
-- **Not ML (be honest):** wind-field arrows (Rankine physics); new-storm heading (climatology).
-- **Stack:** Flask backend, Next.js web, Expo mobile.
-- **Reproduce:** `backtest.py` (metrics), `train_lstm.py` (retrain).
+**Q: Which parts are AI, and which are not? (be honest)**
+> The **track (LSTM)** and the **strength (Random Forest)** are the AI. The little
+> wind arrows around the storm are a standard physics formula, not AI. And for a
+> brand-new storm with no movement yet, the starting direction is an assumption I
+> flag. I'm upfront about all of this.
 
-Good luck — you know this system. Answer plainly, cite the numbers, own the
-limits.
+**Q: Is the physics engine what runs, or the AI?**
+> The AI runs. The app checks: are the trained models there? Yes — so it uses the
+> LSTM and Random Forest. There's a physics backup that only switches on if the
+> AI files are deleted. In normal use it never runs. I can prove it live — the
+> app reports `method: ml`.
+
+**Q: Isn't the Random Forest just a wind-speed rule?**
+> The categories line up with wind levels, but the forest also uses *trends* —
+> whether the storm is strengthening or weakening — so it's smarter than a fixed
+> rule. It's ~90% accurate. Only for brand-new storms with no history do I fall
+> back to the simple rule.
+
+**Q: Why does the LSTM only win at short range?**
+> Because it predicts step by step, and tiny errors add up over 7 days. Nobody's
+> simple model beats a storm's momentum at long range. My gain is in the first
+> 24 hours — the useful window for warnings.
+
+**Q: How is this different from PAGASA?**
+> It's a helper, not a replacement. My extras are: a 7-day AI track, live AI
+> strength classification, and Naga barangay-level flood/surge risk in one app.
+
+**Q: How did you avoid cheating in the test?**
+> I trained on 2013–2022 and tested on 2023–2026 — different storms, split by
+> time, so the model never saw the test storms while learning.
+
+**Q: Biggest limitations?**
+> Long-range track is hard; the rare Super Typhoon class has few examples; and the
+> wind-field arrows are physics, not AI. I know these and can explain each.
+
+---
+
+## 8. Live demo (5 minutes)
+
+1. Open the dashboard — "these are real, live storms."
+2. Point to a storm's category badge — "this comes from the Random Forest."
+3. Point to the dashed 7-day line — "this is the LSTM's path prediction."
+4. Slide the timeline — show weather layers and the 7-day Naga forecast cards.
+5. Open My Area — show barangay flood/surge risk.
+6. (Optional) Analytics page — "this is the measured accuracy on test storms."
+
+*If no storms are active that day, have screenshots or a screen recording ready,
+and just say so honestly.*
+
+---
+
+## 9. One-page cheat sheet
+
+- **What it is:** live typhoon app — 7-day track + strength + Naga flood/surge risk.
+- **LSTM = WHERE.** Learns from past storms; predicts the path; "keep-going guess +
+  small correction." **9–22% better than baseline in the first 24 h.**
+- **Random Forest = HOW STRONG.** 200 voting trees; picks the category;
+  **~90% accurate.** Runs live.
+- **How tested:** trained on 2013–2022 storms, tested on unseen 2023–2026 storms;
+  measured distance error (track) and match rate (strength).
+- **Honest bits:** wind arrows = physics (not AI); brand-new storm heading = an
+  assumption; physics engine = backup only, not normally used.
+- **Stack:** Flask backend, Next.js website, Expo mobile app; live storm + weather
+  data.
+
+**Final reminder:** speak plainly, say the numbers, admit the limits. You know
+this system — that's what wins a defense.
