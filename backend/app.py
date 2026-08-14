@@ -1359,6 +1359,77 @@ def forecast_smart():
     })
 
 
+# Named historical storms available for the demo/defense replay. Each entry maps
+# a short id to (year, storm name in wp_YYYY_data.json). GONI = Rolly (2020), a
+# super typhoon whose real track enters the PAR and passes near Naga City.
+_SCENARIO_STORMS = {
+    'goni': (2020, 'GONI'),
+}
+
+
+@app.route('/api/scenario', methods=['GET'])
+def get_scenario():
+    """
+    Return a real historical storm track for the DEMO/defense replay, normalised
+    to the live-storm schema, plus the Random Forest intensity category at each
+    step. The web and mobile apps step through these points to drive the SAME
+    alert/notification pipeline the live feed uses — proving the app warns when a
+    typhoon approaches/enters the PAR and heads toward Naga.
+
+    Query: ?name=goni  (default goni)
+    Response: { status, name, display_name, source:"DEMO", points:[{lat,lon,
+               pressure,wind_speed}], categories:[int per point] }
+    """
+    key = request.args.get('name', 'goni', type=str).lower()
+    entry = _SCENARIO_STORMS.get(key)
+    if entry is None:
+        return jsonify({'status': 'error',
+                        'error': f'unknown scenario "{key}"',
+                        'available': list(_SCENARIO_STORMS)}), 404
+    year, storm_name = entry
+
+    try:
+        path = os.path.join(os.path.dirname(__file__), 'data', f'wp_{year}_data.json')
+        with open(path, 'r', encoding='utf-8') as f:
+            storms = json.load(f)
+    except Exception as exc:
+        return jsonify({'status': 'error', 'error': f'data load failed: {exc}'}), 500
+
+    storm = next((s for s in storms if str(s.get('name', '')).upper() == storm_name), None)
+    if storm is None or not storm.get('path'):
+        return jsonify({'status': 'error',
+                        'error': f'{storm_name} {year} not found in data'}), 404
+
+    points = []
+    for p in storm['path']:
+        points.append({
+            'lat':        _rf_pf(p.get('lat')),
+            'lon':        _rf_pf(p.get('lon', p.get('long'))),
+            'pressure':   _rf_pf(p.get('pressure', 1010), 1010.0),
+            'wind_speed': _rf_pf(p.get('wind_speed', p.get('speed', 0))),
+        })
+
+    # Per-step intensity via the real Random Forest (falls back to wind bins for
+    # the first few steps that lack enough history), so the demo badge is genuine.
+    categories = []
+    for i in range(len(points)):
+        sub = points[:i + 1]
+        cat = _classify_intensity_rf(sub)
+        if cat is None:
+            cat = _wind_to_cat(points[i]['wind_speed'])
+        categories.append(int(cat))
+
+    return jsonify({
+        'status':        'success',
+        'name':          storm_name,
+        'display_name':  'GONI (Rolly) 2020' if key == 'goni' else f'{storm_name} {year}',
+        'source':        'DEMO',
+        'points':        points,
+        'categories':    categories,
+        'n':             len(points),
+    })
+
+
 @app.route('/api/multi-model-tracks', methods=['POST'])
 def multi_model_tracks():
     """

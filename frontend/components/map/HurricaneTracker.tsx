@@ -8,6 +8,7 @@ import { PAR_BOUNDARY, isInPar } from '@/lib/par'
 import { ParAlerts, computeParAlerts } from '../alerts/ParAlerts'
 import { NotificationCenter } from '../alerts/NotificationCenter'
 import { useParBroadcastEngine } from '@/hooks/useParBroadcastEngine'
+import { useDemoScenario } from '@/hooks/useDemoScenario'
 import { ModelLegend } from './ModelLegend'
 
 interface StormPoint { lat: number; lon: number }
@@ -104,12 +105,18 @@ export function HurricaneTracker() {
   const enabledModels = state.enabledModels
   const showAiLine = enabledModels.includes('AI_ENSEMBLE')
 
+  // Demo Scenario (defense replay). While active, we suppress the live feed and
+  // inject the replayed storm into `storms`, so all the alert/broadcast/track
+  // logic below runs on it unchanged.
+  const demo = useDemoScenario()
+
   // ── Fetch live storms ─────────────────────────────────────────
   // Depends only on [active, retryTick] — NOT on fetchStatus — so that
   // internal state changes (loading→ok) never cancel the in-flight Phase 2 fetch.
   useEffect(() => {
     void retryTick  // dependency — incrementing this re-triggers the effect
     if (!active) { setFetchStatus('idle'); return }
+    if (demo.active) return   // demo replay drives `storms` instead of the live feed
     let cancelled = false
 
     async function load() {
@@ -174,7 +181,36 @@ export function HurricaneTracker() {
 
     load()
     return () => { cancelled = true }
-  }, [active, retryTick])
+  }, [active, retryTick, demo.active])
+
+  // ── Demo replay → inject the replayed storm into `storms` ─────────────────
+  // While the demo is active, mirror its current state into the same TrackedStorm
+  // shape the live feed produces, so PAR alerts, TCWS, and the broadcast engine
+  // all react to it. When it turns off, clear and re-fetch the live feed.
+  useEffect(() => {
+    if (!demo.active) return
+    if (!demo.current) return
+    const c = demo.current
+    const entersParAt = demo.forecast.find(s => isInPar(s.lat, s.lon))?.hour
+    const injected: TrackedStorm = {
+      info: {
+        name: c.name, lat: c.lat, lon: c.lon, wind_speed: c.wind_speed,
+        pressure: c.pressure, category: c.category, path: c.path, freshness: 'live',
+      },
+      forecast: demo.forecast,
+      entersParAt,
+    }
+    setStorms([injected])
+  }, [demo.active, demo.current, demo.forecast])
+
+  useEffect(() => {
+    if (demo.active) return
+    // Demo just ended (or never started): clear injected storm and refresh live.
+    setStorms([])
+    setModelTracks({})
+    modelFetchAt.current = {}
+    setRetryTick(t => t + 1)
+  }, [demo.active])
 
   const hasPannedRef = useRef(false)
   useEffect(() => { if (!active) hasPannedRef.current = false }, [active])

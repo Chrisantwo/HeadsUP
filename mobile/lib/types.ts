@@ -30,6 +30,16 @@ export interface RealtimeStormsResponse {
 
 export interface ForecastStep { lat: number; lon: number; hour: number; wind_speed?: number }
 
+export interface ScenarioResponse {
+  status: string
+  name: string
+  display_name: string
+  source: string
+  points: { lat: number; lon: number; pressure: number; wind_speed: number }[]
+  categories: number[]
+  n: number
+}
+
 export interface ModelTrackPoint { lat: number; lon: number; hour: number; wind_kt: number | null }
 
 export interface ModelTrack {

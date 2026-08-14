@@ -6,6 +6,7 @@ import Slider from '@react-native-community/slider'
 import { LeafletMap } from '../../components/LeafletMap'
 import { ScreenHeader } from '../../components/ScreenHeader'
 import { ForecastStrip } from '../../components/ForecastStrip'
+import { DemoScenario } from '../../components/DemoScenario'
 import { useStormData } from '../../hooks/useStormData'
 import { fetchMultiModel } from '../../lib/api'
 import { fetchWeatherGrid, fetchMarineGrid, dailyForecast, type WeatherGrid, type MarineGrid, type DayForecast } from '../../lib/weather'
@@ -115,6 +116,7 @@ export default function MapScreen() {
           <Ionicons name="locate" size={15} color={colors.primary} />
           <Text style={styles.parBtnText}>PAR</Text>
         </Pressable>
+        <DemoScenario />
       </View>
 
       {/* 7-day forecast + timeline scrubber */}

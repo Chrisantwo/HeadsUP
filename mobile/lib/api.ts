@@ -4,7 +4,7 @@
 import { API_BASE } from './config'
 import type {
   RealtimeStormsResponse, MultiModelResponse, ModelPerformance,
-  ClimateOutlook, ForecastStep, TrackPoint,
+  ClimateOutlook, ForecastStep, TrackPoint, ScenarioResponse,
 } from './types'
 
 const DEFAULT_TIMEOUT = 20000
@@ -39,6 +39,10 @@ function postJson(path: string, body: unknown, timeout?: number) {
 
 export const fetchStorms = () =>
   request<RealtimeStormsResponse>('/api/realtime-storms')
+
+/** Historical storm track (+ per-step RF category) for the defense demo replay. */
+export const fetchScenario = (name = 'goni') =>
+  request<ScenarioResponse>(`/api/scenario?name=${encodeURIComponent(name)}`)
 
 export const fetchModelPerformance = () =>
   request<ModelPerformance>('/api/analytics/model-performance')

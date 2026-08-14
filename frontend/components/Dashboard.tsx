@@ -3,6 +3,8 @@ import { useEffect } from 'react'
 import Link from 'next/link'
 import { TrendingUp, Home } from 'lucide-react'
 import { DashboardProvider, useDashboard } from '@/hooks/useDashboardState'
+import { DemoScenarioProvider } from '@/hooks/useDemoScenario'
+import { DemoScenario } from './demo/DemoScenario'
 import { useWeatherData } from '@/hooks/useWeatherData'
 import { MapWrapper } from './map/MapWrapper'
 import { WindParticleCanvas } from './map/WindParticleCanvas'
@@ -109,6 +111,9 @@ function DashboardShell() {
       {/* ── Bottom timeline ──────────────────────────────────────── */}
       <TimelineBar />
 
+      {/* ── Demo Scenario (defense replay) ───────────────────────── */}
+      <DemoScenario />
+
       {/* ── Hover tooltip ────────────────────────────────────────── */}
       {hoverInfo && <MapTooltip info={hoverInfo} />}
     </div>
@@ -119,7 +124,9 @@ function DashboardShell() {
 export default function Dashboard() {
   return (
     <DashboardProvider>
-      <DashboardShell />
+      <DemoScenarioProvider>
+        <DashboardShell />
+      </DemoScenarioProvider>
     </DashboardProvider>
   )
 }
