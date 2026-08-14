@@ -112,7 +112,7 @@ export function DemoScenarioProvider({ children }: { children: ReactNode }) {
       setIndex(startIdx)
       setForecast([])
       setActive(true)
-      setPlaying(true)
+      setPlaying(false)   // start paused at the approach point; user presses Play
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -125,11 +125,23 @@ export function DemoScenarioProvider({ children }: { children: ReactNode }) {
     setForecast([]); setIndex(0); setError(null)
   }, [])
 
-  const play = useCallback(() => setPlaying(true), [])
+  const play = useCallback(() => {
+    // If we're at the end, restart from the approach point (and re-arm the
+    // one-shot notifications) so the scenario can be replayed.
+    setIndex(i => {
+      if (i >= endIdxRef.current) {
+        wasInParRef.current = false
+        notifiedNagaRef.current = false
+        return startIdxRef.current
+      }
+      return i
+    })
+    setPlaying(true)
+  }, [])
   const pause = useCallback(() => setPlaying(false), [])
   const step = useCallback(() => {
     setPlaying(false)
-    setIndex(i => Math.min(endIdxRef.current, i + 1))
+    setIndex(i => (i >= endIdxRef.current ? startIdxRef.current : i + 1))
   }, [])
 
   // ── Auto-advance while playing ────────────────────────────────────────────

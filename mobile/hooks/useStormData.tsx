@@ -149,7 +149,7 @@ export function StormDataProvider({ children }: { children: ReactNode }) {
       setDemoName(j.display_name || 'GONI (Rolly) 2020')
       setDemoIndex(demoStartIdxRef.current)
       setStorms([]); setForecasts({}); setAlerts([])
-      setDemoActive(true); setDemoPlaying(true)
+      setDemoActive(true); setDemoPlaying(false)   // start paused; user presses Play
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not load the demo scenario.')
     } finally {
@@ -165,11 +165,22 @@ export function StormDataProvider({ children }: { children: ReactNode }) {
     setTimeout(() => load(false), 0)
   }, [load])
 
-  const demoPlay = useCallback(() => setDemoPlaying(true), [])
+  const demoPlay = useCallback(() => {
+    // Restart from the approach point when at the end (re-arm notifications).
+    setDemoIndex(i => {
+      if (i >= demoEndIdxRef.current) {
+        demoWasInParRef.current = false
+        demoNagaRef.current = false
+        return demoStartIdxRef.current
+      }
+      return i
+    })
+    setDemoPlaying(true)
+  }, [])
   const demoPause = useCallback(() => setDemoPlaying(false), [])
   const demoStep = useCallback(() => {
     setDemoPlaying(false)
-    setDemoIndex(i => Math.min(demoEndIdxRef.current, i + 1))
+    setDemoIndex(i => (i >= demoEndIdxRef.current ? demoStartIdxRef.current : i + 1))
   }, [])
 
   // Auto-advance while playing
