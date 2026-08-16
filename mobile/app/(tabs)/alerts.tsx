@@ -87,10 +87,36 @@ function AlertBanner({ alert }: { alert: ParAlert }) {
           </View>
         </View>
         <Text style={styles.bannerBody}>{alertHeadline(alert)}</Text>
+
+        {/* TCWS signal + Naga threat */}
+        <View style={styles.chipsRow}>
+          {alert.tcws && (
+            <View style={[styles.signalChip, { backgroundColor: alert.tcws.color }]}>
+              <Text style={styles.signalText}>{alert.tcws.short}</Text>
+            </View>
+          )}
+          {alert.nagaEtaHours != null && (
+            <View style={styles.nagaChip}>
+              <Ionicons name="location" size={11} color={colors.primary} />
+              <Text style={styles.nagaText}>
+                {alert.nagaEtaHours === 0
+                  ? `Near Naga · ${alert.nagaDistanceKm} km`
+                  : `Naga in ${etaLabel(alert.nagaEtaHours)}`}
+              </Text>
+            </View>
+          )}
+        </View>
+
         <Text style={styles.bannerMeta}>
           {CAT_NAME[alert.category] ?? 'Storm'} · {alert.windKt} kt
-          {alert.status === 'approaching' && alert.etaHours != null ? ` · ETA ${etaLabel(alert.etaHours)}` : ''}
+          {alert.status === 'approaching' && alert.etaHours != null ? ` · PAR ETA ${etaLabel(alert.etaHours)}` : ''}
         </Text>
+
+        {/* Recommended action */}
+        <View style={[styles.actionRow, { borderLeftColor: m.color }]}>
+          <Ionicons name="shield-checkmark" size={13} color={m.color} />
+          <Text style={styles.actionText}>{alert.action}</Text>
+        </View>
       </View>
     </View>
   )
@@ -114,4 +140,18 @@ const styles = StyleSheet.create({
   tagText: { color: '#0a1a3a', fontSize: font.tiny, fontWeight: '900', letterSpacing: 0.4 },
   bannerBody: { color: colors.textSoft, fontSize: font.small, marginTop: 3, lineHeight: 18 },
   bannerMeta: { color: colors.textMuted, fontSize: font.tiny, marginTop: 4 },
+  chipsRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6, flexWrap: 'wrap' },
+  signalChip: { borderRadius: radius.sm, paddingHorizontal: 7, paddingVertical: 2 },
+  signalText: { color: '#0a1a3a', fontSize: font.tiny, fontWeight: '900', letterSpacing: 0.3 },
+  nagaChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    backgroundColor: `${colors.primary}1a`, borderColor: `${colors.primary}55`, borderWidth: 1,
+    borderRadius: radius.sm, paddingHorizontal: 6, paddingVertical: 2,
+  },
+  nagaText: { color: colors.primary, fontSize: font.tiny, fontWeight: '800' },
+  actionRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 8,
+    borderLeftWidth: 3, paddingLeft: 8,
+  },
+  actionText: { color: colors.text, fontSize: font.small, fontWeight: '700', flex: 1, lineHeight: 17 },
 })

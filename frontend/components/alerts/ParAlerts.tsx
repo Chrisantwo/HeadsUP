@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useRef, useState } from 'react'
 import { distanceToParKm, firstParEntryHour, isInPar } from '@/lib/par'
+import { tcwsFromWind, type Tcws } from '@/lib/tcws'
 import type { ModelTrack } from '@/lib/forecastModels'
 
 // ── Alert model ─────────────────────────────────────────────────────
@@ -14,12 +15,51 @@ export interface ParAlert {
   etaHours: number | null                              // earliest model entry
   consensus: { entering: number; total: number } | null
   distanceKm: number
+  tcws: Tcws | null
+  nagaEtaHours: number | null                          // hour of closest approach to Naga
+  nagaDistanceKm: number | null                        // closest-approach distance (km)
+  action: string                                       // recommended action
   /** Optional override — the 3-hour broadcast engine swaps in the latest snapshot text. */
   headline?: string
 }
 
 /** How far outside the boundary a storm can be and still raise a 'watch'. */
 const WATCH_DISTANCE_KM = 300
+const NAGA = { lat: 13.62, lon: 123.18 }   // Naga City, Camarines Sur
+const NAGA_THREAT_KM = 250
+
+function haversineKm(aLat: number, aLon: number, bLat: number, bLon: number): number {
+  const R = 6371, r = Math.PI / 180
+  const dLat = (bLat - aLat) * r, dLon = (bLon - aLon) * r
+  const s = Math.sin(dLat / 2) ** 2 +
+    Math.cos(aLat * r) * Math.cos(bLat * r) * Math.sin(dLon / 2) ** 2
+  return 2 * R * Math.asin(Math.sqrt(s))
+}
+
+/** Closest approach of the storm (now + forecast) to Naga, or null when it stays
+ *  farther than NAGA_THREAT_KM. */
+function nagaApproach(lat: number, lon: number, fc: Array<{ lat: number; lon: number; hour: number }>) {
+  let best = haversineKm(NAGA.lat, NAGA.lon, lat, lon)
+  let bestHour = 0
+  for (const step of fc) {
+    const d = haversineKm(NAGA.lat, NAGA.lon, step.lat, step.lon)
+    if (d < best) { best = d; bestHour = step.hour }
+  }
+  return best <= NAGA_THREAT_KM ? { etaHours: bestHour, distanceKm: Math.round(best) } : null
+}
+
+/** Recommended action, keyed on the wind signal, status, and whether the track
+ *  threatens Naga. Deliberately plain and imperative. */
+export function recommendedAction(status: ParAlertStatus, tcws: Tcws | null, threatensNaga: boolean): string {
+  const sig = tcws?.signal ?? 0
+  if (sig >= 4) return threatensNaga
+    ? 'Evacuate now to a safe shelter. Do not travel.'
+    : 'Take shelter from destructive winds. Do not travel.'
+  if (sig === 3) return 'Prepare to evacuate. Secure your home; avoid rivers, coasts and low-lying areas.'
+  if (sig >= 1) return 'Ready an emergency kit and secure loose items. Monitor official updates.'
+  if (status === 'inside' || status === 'approaching') return 'Monitor updates closely and prepare emergency supplies.'
+  return 'Stay informed — a storm is near the PAR.'
+}
 
 interface StormLike {
   info: { name: string; lat: number; lon: number; wind_speed: number; category: number }
@@ -43,10 +83,20 @@ export function computeParAlerts(
   const alerts: ParAlert[] = []
   for (const storm of storms) {
     const { name, lat, lon, wind_speed, category } = storm.info
-    const base = { storm: name, category, windKt: Math.round(wind_speed) }
+    const windKt = Math.round(wind_speed)
+    const tcws = tcwsFromWind(windKt)
+    const naga = nagaApproach(lat, lon, storm.forecast)
+    const base = {
+      storm: name, category, windKt, tcws,
+      nagaEtaHours: naga ? naga.etaHours : null,
+      nagaDistanceKm: naga ? naga.distanceKm : null,
+    }
 
     if (isInPar(lat, lon)) {
-      alerts.push({ ...base, status: 'inside', etaHours: null, consensus: null, distanceKm: 0 })
+      alerts.push({
+        ...base, status: 'inside', etaHours: null, consensus: null, distanceKm: 0,
+        action: recommendedAction('inside', tcws, !!naga),
+      })
       continue
     }
 
@@ -67,9 +117,13 @@ export function computeParAlerts(
         etaHours: Math.min(...entries),
         consensus: { entering: entries.length, total: tracks.length },
         distanceKm,
+        action: recommendedAction('approaching', tcws, !!naga),
       })
     } else if (distanceKm <= WATCH_DISTANCE_KM) {
-      alerts.push({ ...base, status: 'watch', etaHours: null, consensus: null, distanceKm })
+      alerts.push({
+        ...base, status: 'watch', etaHours: null, consensus: null, distanceKm,
+        action: recommendedAction('watch', tcws, !!naga),
+      })
     }
   }
   const rank: Record<ParAlertStatus, number> = { inside: 0, approaching: 1, watch: 2 }
@@ -140,22 +194,45 @@ export function ParAlerts({ alerts, top = 92 }: { alerts: ParAlert[]; top?: numb
       {visible.map(a => {
         const s = STYLE[a.status]
         const key = `${a.storm}:${a.status}`
+        const nagaText = a.nagaEtaHours != null
+          ? (a.nagaEtaHours === 0 ? `Near Naga · ${a.nagaDistanceKm} km` : `Naga in ${fmtEta(a.nagaEtaHours)}`)
+          : null
         return (
           <div key={key}
-            className={`flex items-center gap-2.5 px-4 py-2 text-white text-sm font-semibold${a.status === 'inside' ? ' animate-pulse' : ''}`}
+            className={`px-4 py-2 text-white${a.status === 'inside' ? ' animate-pulse' : ''}`}
             style={{ background: s.bg, borderRadius: 8, boxShadow: s.shadow }}
             role="alert">
-            <span style={{ fontSize: 16 }}>{s.icon}</span>
-            <span>{alertHeadline(a)}</span>
-            <button onClick={() => setDismissed(prev => new Set(prev).add(key))}
-              aria-label={`Dismiss ${a.storm} alert`}
-              style={{
-                background: 'rgba(255,255,255,0.18)', border: 'none', color: 'white',
-                borderRadius: 5, width: 20, height: 20, lineHeight: 1, fontSize: 12,
-                cursor: 'pointer', flexShrink: 0,
-              }}>
-              ✕
-            </button>
+            <div className="flex items-center gap-2.5 text-sm font-semibold">
+              <span style={{ fontSize: 16 }}>{s.icon}</span>
+              {a.tcws && (
+                <span style={{
+                  background: a.tcws.color, color: '#0a1a3a', borderRadius: 4,
+                  padding: '1px 6px', fontSize: 11, fontWeight: 900, flexShrink: 0,
+                }}>{a.tcws.short}</span>
+              )}
+              <span>{alertHeadline(a)}</span>
+              {nagaText && (
+                <span style={{
+                  background: 'rgba(255,255,255,0.2)', borderRadius: 4,
+                  padding: '1px 6px', fontSize: 11, fontWeight: 800, flexShrink: 0,
+                }}>📍 {nagaText}</span>
+              )}
+              <button onClick={() => setDismissed(prev => new Set(prev).add(key))}
+                aria-label={`Dismiss ${a.storm} alert`}
+                style={{
+                  background: 'rgba(255,255,255,0.18)', border: 'none', color: 'white',
+                  borderRadius: 5, width: 20, height: 20, lineHeight: 1, fontSize: 12,
+                  cursor: 'pointer', flexShrink: 0, marginLeft: 'auto',
+                }}>
+                ✕
+              </button>
+            </div>
+            {a.action && (a.status === 'inside' || a.status === 'approaching') && (
+              <div className="flex items-center gap-1.5 mt-1 text-[11px]"
+                style={{ color: 'rgba(255,255,255,0.92)' }}>
+                <span>🛡</span><span>{a.action}</span>
+              </div>
+            )}
           </div>
         )
       })}
