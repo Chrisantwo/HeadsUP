@@ -26,6 +26,7 @@ export default function MapScreen() {
   const [hour, setHour] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [parKey, setParKey] = useState<string | undefined>(undefined)
+  const [showForecast, setShowForecast] = useState(true)
 
   const [weatherGrid, setWeatherGrid] = useState<WeatherGrid | null>(null)
   const [marineGrid, setMarineGrid] = useState<MarineGrid | null>(null)
@@ -122,6 +123,12 @@ export default function MapScreen() {
       {/* 7-day forecast + timeline scrubber */}
       <View style={styles.bottom}>
         {days.length > 0 && (
+          <Pressable onPress={() => setShowForecast(v => !v)} style={styles.forecastToggle} hitSlop={6}>
+            <Text style={styles.forecastToggleText}>7-DAY FORECAST</Text>
+            <Ionicons name={showForecast ? 'chevron-down' : 'chevron-up'} size={15} color={colors.textSoft} />
+          </Pressable>
+        )}
+        {showForecast && days.length > 0 && (
           <ForecastStrip days={days} activeDay={Math.min(Math.floor(hour / 24), 6)}
             onSelectDay={d => setHour(d * 24)} />
         )}
@@ -195,6 +202,11 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   bottom: { borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.bgElevated, paddingBottom: 2 },
+  forecastToggle: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5,
+    paddingVertical: 5,
+  },
+  forecastToggleText: { color: colors.textSoft, fontSize: font.tiny, fontWeight: '800', letterSpacing: 1 },
   scrubRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingHorizontal: space.lg, paddingBottom: space.sm },
   scrubLabel: { color: colors.text, fontSize: font.tiny, fontWeight: '800', width: 78, fontVariant: ['tabular-nums'] },
 })
